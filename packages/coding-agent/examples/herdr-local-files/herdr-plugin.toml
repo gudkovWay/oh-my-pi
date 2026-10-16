@@ -1,0 +1,16 @@
+id = "omp.local-files"
+name = "OMP Local Files"
+version = "1.0.0"
+min_herdr_version = "0.9.0"
+platforms = ["linux"]
+
+[[actions]]
+id = "open"
+title = "Open local file"
+command = ["bun", "open-file.ts"]
+
+[[link_handlers]]
+id = "local-file"
+title = "Open local file"
+pattern = '^file://(?:localhost)?/'
+action = "open"
