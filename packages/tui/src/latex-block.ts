@@ -149,9 +149,8 @@ const HBRACE_COMMANDS: Record<string, HBraceSpec> = {
 };
 
 /**
- * Number of required arguments each display command consumes. Shared by
- * {@link readArg} and {@link splitLines} so nested command atoms consume exactly
- * their own arguments while preserving any outer command's pending arity.
+ * Number of required arguments each display command consumes. Used by
+ * {@link readArg} to keep nested, unbraced commands with their arguments.
  */
 const COMMAND_ARITY: Record<string, number> = { overset: 2, underset: 2, stackrel: 2, sqrt: 1 };
 for (const name in FRAC_COMMANDS) COMMAND_ARITY[name] = 2;
@@ -1302,81 +1301,7 @@ function parseExpr(src: string, ctx: Ctx = ROOT_CTX): Box {
 	return hconcat(boxes);
 }
 
-/**
- * Count the command arguments still owed at the end of `seg` — non-zero when
- * the row ends mid-construct (`\frac{a}` awaiting its denominator, or
- * `\frac`/`x^` awaiting any argument). Pending arities form a stack: an
- * unbraced nested command consumes one outer argument, then retains its own
- * pending arguments without discarding the outer command's remaining arity.
- * Used to keep a command joined to an argument written on the next source line
- * while still treating an ordinary next row (`a\n{b+c}`) as a real row break.
- */
-function bracesOwed(seg: string): number {
-	const pending: number[] = [];
-	const consumeArg = (): void => {
-		const top = pending.length - 1;
-		if (top < 0) return;
-		if (pending[top] === 1) pending.pop();
-		else pending[top]--;
-	};
-
-	let i = 0;
-	while (i < seg.length) {
-		const c = seg[i];
-		if (c === "\\") {
-			let j = i + 1;
-			let name = "";
-			while (j < seg.length && /[A-Za-z]/.test(seg[j])) name += seg[j++];
-			// A command plus its immediately attached `[…]`/`{…}` groups is one
-			// atom for an enclosing argument, matching readArg. Consume that outer
-			// argument first, then retain only the command's own missing arguments
-			// in a nested frame. Attached groups beyond the known arity still stay
-			// part of the atom and cannot consume another outer argument.
-			consumeArg();
-			const arity = name ? (COMMAND_ARITY[name] ?? 0) : 0;
-			let attached = 0;
-			if (name) {
-				while (seg[j] === "[" || seg[j] === "{") {
-					if (seg[j] === "{") {
-						j = readBraceGroup(seg, j).end;
-						if (attached < arity) attached++;
-					} else {
-						const close = seg.indexOf("]", j);
-						j = close === -1 ? seg.length : close + 1;
-					}
-				}
-			} else {
-				j = i + 2; // non-letter command (`\,`, `\{`, …)
-			}
-			const missing = arity - attached;
-			if (missing > 0) pending.push(missing);
-			i = j;
-			continue;
-		}
-		if (c === "{") {
-			i = readBraceGroup(seg, i).end;
-			consumeArg();
-			continue;
-		}
-		if (c === "^" || c === "_") {
-			pending.push(1);
-			i++;
-			continue;
-		}
-		if (c === " " || c === "\t" || c === "\n") {
-			i++;
-			continue;
-		}
-		consumeArg(); // a bare atom satisfies one pending argument
-		i++;
-	}
-
-	let owed = 0;
-	for (const remaining of pending) owed += remaining;
-	return owed;
-}
-
-/** Split on top-level `\n` and `\\` row separators (outside braces and environments). */
+/** Split on explicit top-level `\\` row separators (outside braces and environments). */
 function splitLines(src: string): string[] {
 	const lines: string[] = [];
 	let braceDepth = 0;
@@ -1412,18 +1337,6 @@ function splitLines(src: string): string[] {
 		}
 		if (c === "{") braceDepth++;
 		else if (c === "}") braceDepth--;
-		else if (c === "\n" && braceDepth === 0 && envDepth === 0) {
-			// A top-level newline is a row break UNLESS the current row ends with a
-			// command still awaiting an argument (e.g. `\frac{num}\n{den}`,
-			// `\frac{num}\n\sqrt{x}`, or `x^\n2`). Splitting there would sever the
-			// command from its argument, so keep both in one segment; latexToBlock
-			// collapses the interior newline to a space before parsing. A row that
-			// merely opens with a braced group (`a\n{b+c}`) stays a break.
-			if (bracesOwed(src.slice(last, i)) === 0) {
-				lines.push(src.slice(last, i));
-				last = i + 1;
-			}
-		}
 		i++;
 	}
 	lines.push(src.slice(last));
@@ -1442,9 +1355,9 @@ export function describeLatex(src: string, display = true): NativeNode {
 /**
  * Render a display LaTeX math fragment to lines with full 2-D layout: stacked
  * fractions, stretchy delimiters, matrix grids, operator limits, drawn
- * radicals. Top-level source newlines and `\\` become vertical rows (so a
- * `lhs =` line stays above its block). Inline math should use `latexToUnicode`
- * instead — fractions there stay single-line.
+ * radicals. Source newlines are TeX whitespace; explicit `\\` starts a new
+ * vertical row. Inline math should use `latexToUnicode` instead — fractions
+ * there stay single-line.
  */
 export function latexToBlock(src: string): string[] {
 	if (typeof src !== "string" || src.trim() === "") return [];

@@ -1,7 +1,10 @@
 import { describe, expect, it } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import { Markdown, renderInlineMarkdown } from "../src/components/markdown";
+import { TUI } from "../src/tui";
+import { visibleWidth } from "../src/utils";
 import { defaultMarkdownTheme } from "./test-themes.js";
+import { VirtualTerminal } from "./virtual-terminal";
 
 /** Render markdown and return non-empty, ANSI-stripped, right-trimmed lines. */
 function renderLines(md: string, width = 100): string[] {
@@ -21,6 +24,39 @@ describe("Markdown math rendering", () => {
 		// `x_i^2` survives because intraword `_` is not emphasis and `^` is plain.
 		const [line] = renderLines("energy $x_i^2 + y_j^2$ done");
 		expect(line).toBe("energy xᵢ² + yⱼ² done");
+	});
+
+	it("keeps a source-wrapped function together and wraps only at the viewport edge", () => {
+		const source = "$$\nF =\n\\max(0,\n\\mathrm{MemAvailable}\n-\n(1\\,\\mathrm{GiB}+J)\n-\nH)\n$$";
+		expect(renderLines(source, 100)).toEqual(["F = max(0, MemAvailable - (1 GiB+J) - H)"]);
+		const narrow = renderLines(source, 24);
+		expect(narrow.join(" ")).toBe("F = max(0, MemAvailable - (1 GiB+J) - H)");
+		expect(narrow.every(line => visibleWidth(line) <= 24)).toBe(true);
+	});
+
+	it("keeps explicit aligned rows distinct while joining their source continuations", () => {
+		const source = "$$\n\\begin{aligned}\nF &= \\max(0,\nH-J) \\\\\nG &= H\n+J\n\\end{aligned}\n$$";
+		expect(renderLines(source)).toEqual(["F = max(0, H-J)", "G = H +J"]);
+	});
+
+	it("reflows a function on the terminal grid without reverting to source-line breaks", async () => {
+		const terminal = new VirtualTerminal(100, 12);
+		const tui = new TUI(terminal);
+		tui.addChild(new Markdown("$$\nF =\n\\max(0,\n\\mathrm{MemAvailable} - H)\n$$", 0, 0, defaultMarkdownTheme));
+		try {
+			tui.start();
+			await terminal.waitForRender();
+			expect(terminal.getViewport()[0]?.trimEnd()).toBe("F = max(0, MemAvailable - H)");
+			terminal.resize(24, 12);
+			await terminal.waitForRender();
+			const rows = terminal
+				.getViewport()
+				.map(line => line.trim())
+				.filter(Boolean);
+			expect(rows.join(" ")).toBe("F = max(0, MemAvailable - H)");
+		} finally {
+			tui.stop();
+		}
 	});
 
 	it("renders an own-line $$…$$ matrix block as a bracketed grid", () => {

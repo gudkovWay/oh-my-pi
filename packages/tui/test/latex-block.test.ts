@@ -284,16 +284,14 @@ describe("latexToBlock (2-D layout)", () => {
 		expect(latexToBlock("\\frac\\hat{a}\n{b}")).toEqual([" â ", "───", " b "]);
 	});
 
-	it("still treats a top-level newline as a row break when it is not an argument continuation", () => {
-		// `lhs =` on its own source line stays a row above its block; two fractions
-		// on separate lines each start with `\frac`, so they stack as two rows.
-		expect(latexToBlock("y =\n\\frac{1}{2}")).toEqual(["y =", " 1 ", "───", " 2 "]);
-		expect(latexToBlock("\\frac{a}{b}\n\\frac{c}{d}")).toEqual([" a ", "───", " b ", " c ", "───", " d "]);
-		// A row that merely *opens* with a braced group is a real row break: no
-		// preceding command owes it an argument, so it must not fold into the row
-		// above (regression for PR #7997 review).
-		expect(latexToBlock("a\n{b+c}")).toEqual(["a  ", "b+c"]);
-		expect(latexToBlock("x+1\n{y+2}")).toEqual(["x+1", "y+2"]);
+	it("treats source newlines as whitespace, keeping equations and function arguments together", () => {
+		expect(latexToBlock("y =\n\\frac{1}{2}")).toEqual(["     1 ", "y = ───", "     2 "]);
+		expect(latexToBlock("a\n{b+c}")).toEqual(["a b+c"]);
+		expect(
+			latexToBlock("F =\n\\max\\left(\n0,\n\\mathrm{MemAvailable}\n-\n(1\\,\\mathrm{GiB}+J)\n-\nH\n\\right)").map(
+				line => line.replace(/\s/g, ""),
+			),
+		).toEqual(["F=max(0,MemAvailable-(1GiB+J)-H)"]);
 	});
 
 	it("keeps \\color scope across a stacked fraction, painting the bar", () => {
