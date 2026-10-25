@@ -1809,6 +1809,20 @@ export class AgentSession implements SettingsScope {
 			scheduleAgentContinue: options => this.#scheduleAgentContinue(options),
 			promptGeneration: () => this.#promptGeneration,
 			hasPendingAsyncWake: () => this.#hasPendingAsyncWake(),
+			pendingAsyncJobIds: () => {
+				const manager = this.#asyncJobManager;
+				if (!manager) return [];
+				const filter = this.#agentId ? { ownerId: this.#agentId } : undefined;
+				return [
+					...new Set([
+						...manager
+							.getRunningJobs(filter)
+							.filter(job => !manager.isDeliverySuppressed(job.id))
+							.map(job => job.id),
+						...manager.getDeliveryState(filter).pendingJobIds,
+					]),
+				];
+			},
 			getActiveToolNames: () => this.getActiveToolNames(),
 			getEnabledToolNames: () => this.getEnabledToolNames(),
 			toolRegistry: () => this.#tools.registry,
