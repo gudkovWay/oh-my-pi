@@ -6,6 +6,15 @@ import { Container } from "../tui";
 import { SvgFigure, svgFigureRendering } from "./svg-figure";
 import { type FigureSegment, splitSvgFences } from "./svg-source";
 import { type ChartSegment, hasChartTable, splitTableCharts, TableChartFigure } from "./table-chart";
+import { ImageReferenceFigure } from "./image-reference-figure";
+import {
+	imageReferenceDefinitions,
+	splitImageReferences,
+	type ImagePreviewResolver,
+	type ImageReferenceSegment,
+} from "./image-reference-source";
+import { isNativeRendering } from "../native/state";
+import type { DescribeContext, NativeNode } from "../native/node";
 
 export interface FigureMarkdownOptions {
 	/** Markdown for one prose run (and a failed figure's code fallback); FigureMarkdown drives its transience. */
@@ -14,6 +23,7 @@ export interface FigureMarkdownOptions {
 	charts: boolean;
 	/** Shared inline-image budget for the figures. */
 	budget?: ImageBudget;
+	resolveImagePreview?: ImagePreviewResolver;
 	/** A figure's rows changed outside a text update (raster landed, fell back to code). */
 	onChange: () => void;
 }
@@ -21,7 +31,8 @@ export interface FigureMarkdownOptions {
 type Part =
 	| { readonly kind: "markdown"; readonly md: Markdown; text: string }
 	| { readonly kind: "svg"; readonly figure: SvgFigure; source: string; closed: boolean }
-	| { readonly kind: "chart"; readonly figure: TableChartFigure; table: Tokens.Table };
+	| { readonly kind: "chart"; readonly figure: TableChartFigure; table: Tokens.Table }
+	| { readonly kind: "image-reference"; readonly figure: ImageReferenceFigure; href: string };
 
 /**
  * Assistant Markdown whose top-level ```svg fences are lifted out of the prose
@@ -39,6 +50,7 @@ export class FigureMarkdown extends Container {
 	#text = "";
 	#transient = false;
 	#parts: Part[] = [];
+	#definitions = "";
 
 	constructor(text: string, options: FigureMarkdownOptions) {
 		super();
@@ -50,6 +62,7 @@ export class FigureMarkdown extends Container {
 	setText(text: string): boolean {
 		if (text === this.#text) return false;
 		this.#text = text;
+		this.#definitions = this.#options.resolveImagePreview ? imageReferenceDefinitions(text) : "";
 		this.#reconcile();
 		return true;
 	}
@@ -87,10 +100,25 @@ export class FigureMarkdown extends Container {
 		return this.#parts.some(part => part.kind !== "markdown" && part.figure.pending);
 	}
 
+	describePreview(href: string, cx: DescribeContext): NativeNode | null {
+		const part = this.#parts.find(part => part.kind === "image-reference" && part.href === href);
+		return part?.kind === "image-reference" ? part.figure.describe(cx) : null;
+	}
+
+	override dispose(): void {
+		for (const part of this.#parts) {
+			if (part.kind !== "markdown") part.figure.dispose();
+		}
+		this.#parts = [];
+		this.clear();
+	}
+
 	/** Rebuild the prose runs through the Markdown factory after its theme changed; figures keep their rasters. */
 	restyle(): void {
 		this.#parts = this.#parts.map(part =>
-			part.kind === "markdown" ? { kind: "markdown", md: this.#options.markdown(part.text), text: part.text } : part,
+			part.kind === "markdown"
+				? { kind: "markdown", md: this.#options.markdown(part.text + "\n" + this.#definitions), text: part.text }
+				: part,
 		);
 		this.#mount();
 		this.#syncTails();
@@ -102,6 +130,24 @@ export class FigureMarkdown extends Container {
 		let reshaped = previous.length !== segments.length;
 		this.#parts = segments.map((segment, index): Part => {
 			const old = previous[index];
+			if (segment.kind === "image-reference") {
+				const retained = previous.find(part => part.kind === "image-reference" && part.href === segment.href);
+				if (retained) {
+					if (retained !== old) reshaped = true;
+					return retained;
+				}
+				reshaped = true;
+				const figure = new ImageReferenceFigure(
+					segment.href,
+					this.#options.resolveImagePreview!,
+					this.#options.budget,
+					() => {
+						this.#mount();
+						this.#options.onChange();
+					},
+				);
+				return { kind: "image-reference", figure, href: segment.href };
+			}
 			if (segment.kind === "chart") {
 				if (old?.kind === "chart") {
 					old.table = segment.table;
@@ -114,12 +160,12 @@ export class FigureMarkdown extends Container {
 			if (segment.kind === "markdown") {
 				const text = segment.text.trim();
 				if (old?.kind === "markdown") {
-					old.md.setText(text);
+					old.md.setText(text + "\n" + this.#definitions);
 					old.text = text;
 					return old;
 				}
 				reshaped = true;
-				return { kind: "markdown", md: this.#options.markdown(text), text };
+				return { kind: "markdown", md: this.#options.markdown(text + "\n" + this.#definitions), text };
 			}
 			if (old?.kind === "svg") {
 				old.source = segment.source;
@@ -148,13 +194,20 @@ export class FigureMarkdown extends Container {
 	 * The block as prose, ```svg fences (when figures are on) and charts after
 	 * complete tables (when charts are on); only the last run can still stream.
 	 */
-	#segments(): (FigureSegment | ChartSegment)[] {
-		const fences: FigureSegment[] = svgFigureRendering()
-			? splitSvgFences(this.#text)
-			: [{ kind: "markdown", text: this.#text }];
-		if (!this.#options.charts || !hasChartTable(this.#text)) return fences;
-		const last = fences.length - 1;
-		return fences.flatMap((segment, index): (FigureSegment | ChartSegment)[] =>
+	#segments(): (FigureSegment | ChartSegment | ImageReferenceSegment)[] {
+		const fences: FigureSegment[] =
+			svgFigureRendering() && !isNativeRendering()
+				? splitSvgFences(this.#text)
+				: [{ kind: "markdown", text: this.#text }];
+		const seen = new Set<string>();
+		const images = fences.flatMap((segment): (FigureSegment | ImageReferenceSegment)[] =>
+			segment.kind === "markdown" && this.#options.resolveImagePreview
+				? splitImageReferences(segment.text, this.#definitions, seen)
+				: [segment],
+		);
+		if (!this.#options.charts || isNativeRendering() || !hasChartTable(this.#text)) return images;
+		const last = images.length - 1;
+		return images.flatMap((segment, index): (FigureSegment | ChartSegment | ImageReferenceSegment)[] =>
 			segment.kind === "markdown" ? splitTableCharts(segment.text, this.#transient && index === last) : [segment],
 		);
 	}
@@ -162,7 +215,12 @@ export class FigureMarkdown extends Container {
 	/** Mount the parts as children, a blank row between neighbours; a chart draws its own when it has rows. */
 	#mount(): void {
 		this.clear();
+		const seen = new Set<string>();
 		this.#parts.forEach((part, index) => {
+			if (part.kind === "image-reference" && part.figure.sourceKey) {
+				if (seen.has(part.figure.sourceKey)) return;
+				seen.add(part.figure.sourceKey);
+			}
 			if (index > 0 && part.kind !== "chart") this.addChild(new Spacer(1));
 			this.addChild(part.kind === "markdown" ? part.md : part.figure);
 		});
@@ -175,7 +233,7 @@ export class FigureMarkdown extends Container {
 			const streaming = this.#transient && index === last;
 			if (part.kind === "markdown") part.md.transientRenderCache = streaming;
 			else if (part.kind === "svg") part.figure.update(part.source, part.closed || !streaming);
-			else part.figure.update(part.table);
+			else if (part.kind === "chart") part.figure.update(part.table);
 		});
 	}
 }

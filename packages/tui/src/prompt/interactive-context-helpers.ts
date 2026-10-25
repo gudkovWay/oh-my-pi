@@ -5,6 +5,7 @@ import { EMPTY_LINK_TARGETS } from "../render/render-utils";
 import type { ImageBudget } from "../components/image";
 import type { AssistantThinkingRenderer } from "../chat/extension-types";
 import { AssistantMessageComponent } from "../chat/assistant-message";
+import type { ImagePreviewResolver } from "../chat/image-reference-source";
 /** Session display capabilities supplied unchanged by the interactive host. */
 export interface AssistantMessageSession {
 	readonly model?: Model;
@@ -25,6 +26,7 @@ export interface AssistantMessageHost {
 	readonly ui: { requestRender(): void; readonly imageBudget: ImageBudget };
 	/** Resolve already-extracted Markdown link destinations to local targets. */
 	resolveAssistantMessageLinkHrefs(hrefs: readonly string[]): Promise<ReadonlyMap<string, string>>;
+	getAssistantImagePreviewResolver?(): ImagePreviewResolver;
 }
 
 const kMarkdownLinkTargets = Symbol("markdownLinkTargets");
@@ -125,6 +127,8 @@ export function createAssistantMessageComponent(
 		ctx.proseOnlyThinking,
 		linkTargets,
 		ctx.expandThinkingBlocks,
+		ctx.getAssistantImagePreviewResolver?.(),
+		ctx.assistantImagesVisible,
 	);
 	component.setImagesVisible(ctx.assistantImagesVisible);
 	component.setTableChartsVisible(ctx.tableChartsVisible);
