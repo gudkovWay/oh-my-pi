@@ -11,7 +11,7 @@ import {
 import { addKeyAliases, canonicalKeyId, getKeybindings } from "../keybindings";
 import { type KeyId, parseKey, parseKittySequence } from "../keys";
 import { getSpaceHoldText, SpaceHoldGesture } from "../space-hold";
-import { type Component, TUI } from "../tui";
+import { TUI } from "../tui";
 import type { AppKeybinding } from "../app-keybindings";
 import { formatTooltipKey } from "../key-hint-format";
 import { MAIN_AGENT_ID } from "../overlays/agent-hub-types";
@@ -41,7 +41,7 @@ import {
 import { type MacOSSpellingFeatures, MacOSSpellingProvider } from "./macos-spelling";
 import { TypingWordTracker } from "./typing-word";
 import { hasMagicKeyword, highlightMagicKeywords, magicKeywordRanges } from "./magic-keywords";
-import type { TspEditorDecoration, TspText } from "@oh-my-pi/pi-wire";
+import type { TspEditorDecoration, TspEditorProps, TspProps, TspText } from "@oh-my-pi/pi-wire";
 import { isNativeRendering } from "../native/state";
 import { isQueuedMessageList, parseQueueShorthand, QUEUE_LIST_MARKER_RE } from "./queue-input";
 import { type WordCompletionMethod, WordCompletionProvider } from "./word-completion";
@@ -941,15 +941,6 @@ export class CustomEditor extends Editor {
 		);
 	};
 
-	/** Catch the typed word up with the caret first: its leaving the word (or a blur) re-describes the typo marks. */
-	override describe(cx: DescribeContext): NativeNode {
-		const caret = this.getCursor();
-		if (this.#typing.update(this.textRevision, this.getLines(), caret.line, caret.col, this.focused)) {
-			this.invalidate();
-		}
-		return super.describe(cx);
-	}
-
 	/**
 	 * TSP decorations: magic keywords shimmer (terminal-clocked) in the accent
 	 * color, chips and markers take their token colors, misspellings are marked,
@@ -1087,15 +1078,86 @@ export class CustomEditor extends Editor {
 	override describeLanguage = (): string | undefined => this.composerState().shell?.kind;
 	/** Host-owned live state for the TSP composer (shell mode, effort chip, send/stop). */
 	composerState: () => ComposerNativeState = () => IDLE_COMPOSER;
-	/** The attachment band, described inside the composer on a TSP terminal (ANSI renders it above). */
-	attachmentChips: Component | undefined;
 	/** The status line's facts the TSP composer carries (context, model, usage, the other segments). */
 	composerFacts: ComposerFactsSource | undefined;
+	#composerCollapsed = false;
+	#boundedComposer: { root: NativeNode; lines: number; node: NativeNode } | undefined;
+	#collapsedComposer: { revision: number; running: boolean; node: NativeNode } | undefined;
+
+	override describe(cx: DescribeContext): NativeNode {
+		const caret = this.getCursor();
+		if (this.#typing.update(this.textRevision, this.getLines(), caret.line, caret.col, this.focused)) {
+			this.invalidate();
+		}
+		if (this.#composerCollapsed) {
+			const { running } = this.composerState();
+			const cached = this.#collapsedComposer;
+			if (cached?.revision === this.textRevision && cached.running === running) return cached.node;
+			const collapsed = node("col", { role: "omp.editor" }, [
+				row(
+					compact([
+						node(
+							"button",
+							{
+								role: "omp.composer.expand",
+								text: "Edit",
+								variant: "quiet",
+								size: "sm",
+								title: "Expand composer",
+								aria: "Expand composer",
+								actions: { click: "composer.expand" },
+							},
+							undefined,
+							"expand",
+						),
+						node(
+							"text",
+							{
+								role: "omp.composer.preview",
+								text: this.getText().replace(/\s+/g, " ").trim() || "Write a message",
+								wrap: "none",
+								grow: 1,
+								min: { w: 0 },
+								actions: { click: "composer.expand" },
+							},
+							undefined,
+							"preview",
+						),
+						running &&
+							node(
+								"button",
+								{
+									role: "omp.composer.stop",
+									text: "Stop",
+									variant: "quiet",
+									size: "sm",
+									actions: { click: "interrupt" },
+								},
+								undefined,
+								"stop",
+							),
+					]),
+					{ align: "center", gap: "sm", actions: { click: "composer.expand" } },
+				),
+			]);
+			this.#collapsedComposer = { revision: this.textRevision, running, node: collapsed };
+			return collapsed;
+		}
+		const root = super.describe(cx);
+		const lines = Math.max(1, Math.floor((this.viewportRowsProvider?.() || process.stdout.rows || 24) / 3));
+		const cached = this.#boundedComposer;
+		if (cached?.root === root && cached.lines === lines) return cached.node;
+		const bounded = node("col", { ...(root.p as TspProps<"col">), max: { h: `${lines}lines` } }, root.c, root.key);
+		this.#boundedComposer = { root, lines, node: bounded };
+		return bounded;
+	}
+
 	#nativeComposer:
 		| {
 				key: string;
 				facts: ComposerFacts | undefined;
-				chips: Component | undefined;
+				chips: readonly ComposerChipDescriptor[];
+				attachments: NativeNode | undefined;
 				input: NativeNode;
 				rate: number | undefined;
 				controls: ComposerControls;
@@ -1122,6 +1184,11 @@ export class CustomEditor extends Editor {
 		const thinkingKey = this.#actionKeys.get("app.thinking.cycle")?.[0];
 		const modelKey = this.#actionKeys.get("app.model.selectTemporary")?.[0];
 		const interruptKey = this.#actionKeys.get("app.interrupt")?.[0] ?? "escape";
+		// Tern's composer uses taller lines than the grid; leave room for its chrome.
+		const maxLines = Math.max(
+			1,
+			Math.min(8, Math.floor((this.viewportRowsProvider?.() || process.stdout.rows || 24) / 3) - 7),
+		);
 		const key = [
 			shell?.kind,
 			shell?.excluded,
@@ -1134,9 +1201,10 @@ export class CustomEditor extends Editor {
 			state.viewing?.join("\u0001"),
 			effortGlyph,
 			state.thinkingInModel,
+			maxLines,
 		].join("\0");
 		const rate = state.rate;
-		const chips = this.attachmentChips;
+		const chips = this.composerChips();
 		const memo = this.#nativeComposer;
 		if (
 			memo &&
@@ -1152,9 +1220,33 @@ export class CustomEditor extends Editor {
 			memo?.key === key && memo.facts === facts
 				? memo.controls
 				: this.#describeComposerControls(state, facts, thinkingKey, modelKey, interruptKey, effortGlyph);
+		const attachments =
+			memo?.chips === chips
+				? memo.attachments
+				: chips.length === 0
+					? undefined
+					: node(
+							"text",
+							{
+								role: "omp.composer.attachments",
+								aria: "Attachments",
+								wrap: "none",
+								min: { w: 0 },
+								max: { w: "40ch" },
+								spans: chips.map((chip, index) =>
+									span(
+										`${index === 0 ? "" : " · "}${chip.kind === "paste" ? "Text" : chip.kind === "video" ? "Video" : "Image"} #${chip.n}`,
+										undefined,
+										chip.kind !== "paste" && chip.link ? { href: chip.link } : undefined,
+									),
+								),
+							},
+							undefined,
+							"attachments",
+						);
 		// The rate ticks while a turn streams: only the bar follows it.
 		const bar =
-			memo?.controls === controls && memo.rate === rate
+			memo?.controls === controls && memo.rate === rate && memo.attachments === attachments
 				? memo.bar
 				: keyed(
 						row(
@@ -1168,6 +1260,7 @@ export class CustomEditor extends Editor {
 										undefined,
 										"rate",
 									),
+								attachments,
 								// The status facts are the bar's flexible space; without them a spacer keeps send at the end.
 								facts?.extras ?? node("row", { grow: 1 }, [], "gap"),
 								facts?.usage,
@@ -1178,17 +1271,47 @@ export class CustomEditor extends Editor {
 						),
 						"bar",
 					);
+		const inputProps = input.p as TspEditorProps;
+		const field = node(
+			"editor",
+			{
+				...inputProps,
+				maxLines: Math.min(inputProps.maxLines || maxLines, maxLines),
+			},
+			undefined,
+			input.key,
+		);
 		const line = keyed(
-			row(compact([controls.mode, input]), { role: "omp.composer.line", align: "start", gap: "sm" }),
+			row(
+				compact([
+					controls.mode,
+					field,
+					node(
+						"button",
+						{
+							role: "omp.composer.collapse",
+							text: "Collapse",
+							variant: "quiet",
+							size: "sm",
+							title: "Collapse composer",
+							aria: "Collapse composer",
+							actions: { click: "composer.collapse" },
+						},
+						undefined,
+						"collapse",
+					),
+				]),
+				{ role: "omp.composer.line", align: "start", gap: "sm" },
+			),
 			"line",
 		);
 		const layout: NativeEditorLayout = {
 			role: shell ? `omp.editor.${shell.kind}` : "omp.editor",
 			tone: state.running ? "pending" : undefined,
-			children: compact([facts?.context, controls.focus, chips, line, bar]),
+			children: compact([facts?.context, controls.focus, line, bar]),
 			caret: "line/input",
 		};
-		this.#nativeComposer = { key, facts, chips, input, rate, controls, bar, layout };
+		this.#nativeComposer = { key, facts, chips, attachments, input, rate, controls, bar, layout };
 		return layout;
 	};
 
@@ -1432,6 +1555,12 @@ export class CustomEditor extends Editor {
 			return;
 		}
 		switch (event.act) {
+			case "composer.collapse":
+				this.#composerCollapsed = true;
+				return;
+			case "composer.expand":
+				this.#composerCollapsed = false;
+				return;
 			case "thinking.cycle":
 				this.onCycleThinkingLevel?.();
 				return;
@@ -1616,6 +1745,7 @@ export class CustomEditor extends Editor {
 	}
 
 	override handleInput(data: string): void {
+		if (data !== "\x1b[I" && data !== "\x1b[O") this.#composerCollapsed = false;
 		// Serialize behind any in-flight async paste so a trailing Enter / follow-up key can't
 		// submit before the clipboard image reaches `pendingImages` (Codex PR #3602 review).
 		if (this.#pasteInFlight > 0) {

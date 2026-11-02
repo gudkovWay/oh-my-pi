@@ -2192,7 +2192,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.attachmentChipsContainer = new Container();
 		const attachmentChips = new AttachmentChipsBand(this.editor, this.ui.imageBudget, () => this.ui.requestRender());
 		this.attachmentChipsContainer.addChild(attachmentChips);
-		this.editor.attachmentChips = attachmentChips;
 		// Restored drafts (esc-esc, /tree, branch) re-materialize chip links off the render
 		// path so their chip tokens become clickable again instead of degrading to dead text.
 		this.editor.draftImageLinkMaterializer = images => materializeImageChipLinks(images, this.sessionManager);
@@ -8227,7 +8226,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		nextEditor.onPredictionShown = () => this.#eventController.composerPrediction.shown();
 		nextEditor.composerState = () => this.#composerNativeState();
 		nextEditor.onToggleDictation = () => void this.#toggleComposerDictation();
-		nextEditor.attachmentChips = previousEditor.attachmentChips;
 		nextEditor.imageReferenceHyperlink = imageReferenceHyperlink;
 		nextEditor.skillFilePath = name => this.skillCommands.get(`skill:${name}`)?.filePath;
 		nextEditor.modelMentionLabel = selector => {
