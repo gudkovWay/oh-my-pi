@@ -68,12 +68,18 @@ describe("native composer", () => {
 
 		rows = 15;
 		const split = editor.describe(cx);
-		expect(split.p).toMatchObject({ max: { h: "5lines" } });
+		expect(split.p).toMatchObject({ max: { h: "6lines" } });
 		expect(input(split).p).toMatchObject({ text: draft, maxLines: 1 });
 		expect(byRole(split, "omp.composer.send")).toBeDefined();
 
+		rows = 11;
+		const short = editor.describe(cx);
+		expect(short.p).toMatchObject({ max: { h: "6lines" } });
+		expect(input(short).p).toMatchObject({ maxLines: 1 });
+		expect(byRole(short, "omp.composer.send")).toBeDefined();
+
 		rows = 2;
-		expect(editor.describe(cx).p).toMatchObject({ max: { h: "1lines" } });
+		expect(editor.describe(cx).p).toMatchObject({ max: { h: "6lines" } });
 		expect(input(editor.describe(cx)).p).toMatchObject({ maxLines: 1 });
 		expect(editor.getText()).toBe(draft);
 	});

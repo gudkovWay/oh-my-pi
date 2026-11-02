@@ -1144,7 +1144,8 @@ export class CustomEditor extends Editor {
 			return collapsed;
 		}
 		const root = super.describe(cx);
-		const lines = Math.max(1, Math.floor((this.viewportRowsProvider?.() || process.stdout.rows || 24) / 3));
+		// A one-line editor and its footer still need room in a short pane.
+		const lines = Math.max(6, Math.floor((this.viewportRowsProvider?.() || process.stdout.rows || 24) / 3));
 		const cached = this.#boundedComposer;
 		if (cached?.root === root && cached.lines === lines) return cached.node;
 		const bounded = node("col", { ...(root.p as TspProps<"col">), max: { h: `${lines}lines` } }, root.c, root.key);
