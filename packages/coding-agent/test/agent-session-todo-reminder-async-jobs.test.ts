@@ -208,6 +208,16 @@ describe("AgentSession todo reminder async-job deferral", () => {
 		// Only a background result can resume this pause, so the event says so.
 		expect(agentEndAwaitingAsyncWork).toEqual([true]);
 		expect(extensionEnds).toEqual([expect.objectContaining({ willContinue: true, awaitingAsyncWork: true })]);
+		const assessment = sessionManager
+			.getBranch()
+			.filter(entry => entry.type === "custom" && entry.customType === "todo_stop_assessment")
+			.at(-1);
+		expect(assessment).toMatchObject({
+			data: {
+				status: "waiting_job",
+				jobIds: manager.getRunningJobs({ ownerId: "Main" }).map(job => job.id),
+			},
+		});
 	});
 
 	it("does not defer for a running job owned by a different agent", async () => {

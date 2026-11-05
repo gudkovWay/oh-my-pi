@@ -6,6 +6,19 @@ import { fileUriForTerminal } from "@oh-my-pi/pi-tui/render/hyperlink";
 import { extractUriScheme, InternalUrlRouter, parseInternalUrl, type ResolveContext } from "./index";
 import { expandPath } from "../tools/path-utils";
 
+/** Locate only linkable local resources; never invoke a materializing resolver. */
+export async function locateMarkdownLink(href: string, context?: ResolveContext): Promise<string | null> {
+	if (!href || /[\x00-\x1f\x7f]/.test(href) || /^(?:#|\?|\/\/)/.test(href)) return null;
+	const scheme = extractUriScheme(href);
+	const router = InternalUrlRouter.instance();
+	if (scheme && scheme !== "file" && !(router.spec(scheme)?.linkable && router.canHandle(href))) return null;
+	if (router.canHandle(href)) return router.locate(href, context);
+	const suffixIndex = href.search(/[?#]/);
+	const filePath = suffixIndex < 0 ? href : href.slice(0, suffixIndex);
+	const decoded = scheme === "file" ? url.fileURLToPath(href) : decodeURIComponent(filePath);
+	return path.resolve(context?.cwd ?? process.cwd(), expandPath(decoded));
+}
+
 /**
  * Resolve Markdown link destinations (as extracted by `getMarkdownLinkUrls`)
  * to existing local resources or absolute file URLs. Relative paths use the
@@ -30,21 +43,14 @@ export async function resolveMarkdownLinkHrefs(
 	await Promise.all(
 		[...urls].map(async href => {
 			try {
-				let sourcePath: string;
-				let suffix: string;
-				if (router.canHandle(href)) {
-					const located = await router.locate(href, context);
-					if (located === null) return;
-					sourcePath = located;
-					suffix = parseInternalUrl(href).hash;
-				} else {
-					const suffixIndex = href.search(/[?#]/);
-					const filePath = suffixIndex < 0 ? href : href.slice(0, suffixIndex);
-					suffix = suffixIndex < 0 ? "" : href.slice(suffixIndex);
-					const decoded =
-						extractUriScheme(href) === "file" ? url.fileURLToPath(href) : decodeURIComponent(filePath);
-					sourcePath = path.resolve(context?.cwd ?? process.cwd(), expandPath(decoded));
-				}
+				const sourcePath = await locateMarkdownLink(href, context);
+				if (sourcePath === null) return;
+				const suffixIndex = href.search(/[?#]/);
+				const suffix = router.canHandle(href)
+					? parseInternalUrl(href).hash
+					: suffixIndex < 0
+						? ""
+						: href.slice(suffixIndex);
 				const stat = await fs.stat(sourcePath);
 				if (!stat.isFile() && !stat.isDirectory()) return;
 				const target = fileUriForTerminal(sourcePath, undefined, TERMINAL.id);

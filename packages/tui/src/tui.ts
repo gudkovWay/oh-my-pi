@@ -22,7 +22,7 @@ import type { TspFrame, TspNode, TspText } from "@oh-my-pi/pi-wire";
 import { DEFAULT_MAX_INLINE_IMAGES, ImageBudget } from "./components/image";
 import { TuiDebugServer } from "./debug-server";
 import { extractPrintableText, isKeyRelease, matchesKey } from "./keys";
-import { KITTY_PLACEHOLDER } from "./kitty-graphics";
+import { detectKittyUnicodePlaceholdersSupport, KITTY_PLACEHOLDER, setKittyGraphics } from "./kitty-graphics";
 import { LoopWatchdog } from "./loop-watchdog";
 import { assumedTspHello, NativeBackend, type NativeHost } from "./native/backend";
 import { col } from "./native/describe";
@@ -1607,6 +1607,20 @@ export class TUI extends Container {
 		// the terminal as tofu; a full repaint re-emits them against the glossary.
 		this.terminal.onGlyphProtocolReport?.(supported => {
 			if (!supported || this.#stopped) return;
+			this.invalidate();
+			this.requestRender(true);
+		});
+		this.terminal.onKittyGraphicsSupport?.(supported => {
+			if (!supported || this.#stopped || this.#nativeLive || this.terminal.tspExpected || isImageProtocolForced())
+				return;
+			setTerminalImageProtocol(ImageProtocol.Kitty);
+			setKittyGraphics({
+				unicodePlaceholders: detectKittyUnicodePlaceholdersSupport(TERMINAL.id, {
+					...Bun.env,
+					PI_FORCE_IMAGE_PROTOCOL: "kitty",
+				}),
+			});
+			this.#queryCellSize();
 			this.invalidate();
 			this.requestRender(true);
 		});

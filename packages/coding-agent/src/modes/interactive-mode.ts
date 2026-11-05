@@ -155,6 +155,8 @@ import { syncTextPrediction, textPredictionBackend } from "../predict/client";
 import { setWordPredictionHost } from "@oh-my-pi/pi-tui/prompt/word-completion";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
 import { resolveMarkdownLinkHrefs } from "../internal-urls/hyperlink-targets";
+import { createImagePreviewResolver } from "../internal-urls/image-preview-targets";
+import type { ImagePreviewResolver } from "@oh-my-pi/pi-tui/chat/image-reference-source";
 import type { ResolveContext } from "../internal-urls/index";
 import { modelMentionChipLabel, shiftImageMarkers } from "@oh-my-pi/pi-tui/prompt/composer-attachments";
 import { isTranscriptEntry, type SessionContext } from "../session/session-context";
@@ -1345,6 +1347,7 @@ const CTRL_L_APPEARANCE_RESPONSE_DEADLINE_MS = 2000;
 const JOBS_SHEET_REFRESH_MS = 250;
 
 export class InteractiveMode implements InteractiveModeContext {
+	readonly #imagePreviewResolvers = new WeakMap<AgentViewSession, { cwd: string; resolver: ImagePreviewResolver }>();
 	#ownsStartedUi: boolean;
 	session: AgentSession;
 	sessionManager: SessionManager;
@@ -1889,6 +1892,17 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 	resolveAssistantMessageLinkHrefs(hrefs: readonly string[]): Promise<ReadonlyMap<string, string>> {
 		return resolveMarkdownLinkHrefs(hrefs, this.#linkResolveContext());
+	}
+	getAssistantImagePreviewResolver(): ImagePreviewResolver {
+		const session = this.viewSession;
+		const context = this.#linkResolveContext();
+		const cwd = context.cwd ?? process.cwd();
+		let cached = this.#imagePreviewResolvers.get(session);
+		if (!cached || cached.cwd !== cwd) {
+			cached = { cwd, resolver: createImagePreviewResolver(context) };
+			this.#imagePreviewResolvers.set(session, cached);
+		}
+		return cached.resolver;
 	}
 	#linkResolveContext(): ResolveContext {
 		const session = this.viewSession;

@@ -173,6 +173,85 @@ describe("AgentSession todo reminder self-continuation suppression", () => {
 		vi.restoreAllMocks();
 	});
 
+	function stopAssessment() {
+		return sessionManager
+			.getBranch()
+			.filter(entry => entry.type === "custom" && entry.customType === "todo_stop_assessment")
+			.at(-1);
+	}
+
+	it("continues available source work when rendering alone is blocked", async () => {
+		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+		session.setTodoPhases([
+			{
+				name: "Implementation",
+				tasks: [
+					{ content: "Render", status: "blocked", blocker: "owned output unavailable" },
+					{ content: "Implement picker", status: "pending" },
+				],
+			},
+		]);
+		emitTextOnlyStop("Rendering is unavailable, stopping the entire task.");
+		await session.waitForIdle();
+		expect(continueSpy).toHaveBeenCalledTimes(1);
+		expect(reminderAttempts).toEqual([1]);
+		expect(stopAssessment()).toMatchObject({
+			data: { status: "continuing", actionable: [{ content: "Implement picker", status: "pending" }] },
+		});
+	});
+
+	it("reconciles an all-blocked list once instead of silently treating it as completion", async () => {
+		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+		session.setTodoPhases([
+			{
+				name: "Work",
+				tasks: [{ content: "Implement picker", status: "blocked", blocker: "render unavailable" }],
+			},
+		]);
+		emitTextOnlyStop("All remaining tasks are blocked.");
+		await session.waitForIdle();
+		expect(continueSpy).toHaveBeenCalledTimes(1);
+		expect(reminderAttempts).toEqual([1]);
+		expect(stopAssessment()).toMatchObject({ data: { status: "continuing", reason: "blocked-reconciliation" } });
+	});
+
+	it("persists a failed stop and independently warns when a reminder gets only another acknowledgement", async () => {
+		const notices: AgentSessionEvent[] = [];
+		session.subscribe(event => {
+			if (event.type === "notice") notices.push(event);
+		});
+		vi.spyOn(session.agent, "continue").mockImplementation(async () => {
+			emitTextOnlyStop("Acknowledged.");
+		});
+		emitTextOnlyStop("Stopping with unfinished work.");
+		await session.waitForIdle();
+		expect(reminderAttempts).toEqual([1]);
+		expect(stopAssessment()).toMatchObject({ data: { status: "failed", reason: "no-tool-progress" } });
+		expect(notices).toContainEqual(
+			expect.objectContaining({
+				type: "notice",
+				level: "warning",
+				source: "todo-stop-control",
+			}),
+		);
+	});
+
+	it("records a user-input wait without claiming that unfinished work is complete", async () => {
+		vi.spyOn(session.agent, "continue").mockResolvedValue();
+		emitTextOnlyStop("Which account should I use?");
+		await session.waitForIdle();
+		expect(stopAssessment()).toMatchObject({ data: { status: "needs_owner", reason: "user-facing-question" } });
+		expect(reminderAttempts).toEqual([]);
+	});
+
+	it("does not trust a prose waiting_job claim when no owned async wake exists", async () => {
+		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+		emitTextOnlyStop('{"stop_result":{"status":"waiting_job","job_id":"invented"}}');
+		await session.waitForIdle();
+		expect(continueSpy).toHaveBeenCalledTimes(1);
+		expect(stopAssessment()).toMatchObject({ data: { status: "continuing", jobIds: [] } });
+	});
+
 	it("baseline: a single text-only stop fires reminder 1/3 and records it in the transcript", async () => {
 		vi.spyOn(session.agent, "continue").mockResolvedValue();
 		emitTextOnlyStop();
