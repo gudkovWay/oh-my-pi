@@ -1009,7 +1009,10 @@ export class AssistantMessageComponent extends Container {
 						this.#nativeLinkSources.set(text, resolved);
 						return resolved;
 					};
-					const figure = this.#figureBlocks.get(index);
+					let figure = this.#figureBlocks.get(index);
+					if (!figure && this.resolveImagePreview && this.#liftsFigures(source)) {
+						figure = this.#figureBlock(index, source, this.#figureBlocks);
+					}
 					const references =
 						figure && this.resolveImagePreview
 							? splitImageReferences(source)
@@ -1519,7 +1522,10 @@ export class AssistantMessageComponent extends Container {
 	 * `previous` so its figures keep their rasters across rebuilds.
 	 */
 	#proseBlock(index: number, text: string, previous: ReadonlyMap<number, FigureMarkdown>): ProseBlock {
-		if (!this.#liftsFigures(text)) return this.#createMarkdown("text", text);
+		return this.#liftsFigures(text) ? this.#figureBlock(index, text, previous) : this.#createMarkdown("text", text);
+	}
+
+	#figureBlock(index: number, text: string, previous: ReadonlyMap<number, FigureMarkdown>): FigureMarkdown {
 		let block = previous.get(index);
 		if (block) {
 			block.setText(text);

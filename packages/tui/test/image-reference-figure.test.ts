@@ -231,3 +231,39 @@ test("native previews preserve text renderers without mutating provider content"
 		setNativeRendering(originalNative);
 	}
 });
+
+test("restored replies hydrate local previews when native rendering activates after construction", async () => {
+	const originalNative = isNativeRendering();
+	setNativeRendering(false);
+	setTerminalImageProtocol(null);
+	const landed = Promise.withResolvers<void>();
+	let reads = 0;
+	const component = new AssistantMessageComponent(
+		message("Before [picture](./a.png).\n\nAfter."),
+		false,
+		landed.resolve,
+		[],
+		undefined,
+		true,
+		undefined,
+		false,
+		undefined,
+		async () => {
+			reads++;
+			return value;
+		},
+	);
+	try {
+		expect(reads).toBe(0);
+		setNativeRendering(true);
+		const context = { cols: 80, reduceMotion: false, dark: true, supports: () => true, feature: () => true };
+		component.describe(context);
+		expect(reads).toBe(1);
+		await landed.promise;
+		expect(JSON.stringify(component.describe(context))).toContain('"k":"image"');
+		expect(reads).toBe(1);
+	} finally {
+		component.dispose();
+		setNativeRendering(originalNative);
+	}
+});
