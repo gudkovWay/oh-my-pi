@@ -93,6 +93,8 @@ const probe: RuntimeProbe = async (op, ...args) => {
 			return true;
 		case "register":
 			return registerBody(manager(args[0]), String(args[1]), args[2] === true);
+		case "retainedResult":
+			return manager(args[0]).readResult(String(args[1]), String(args[2]));
 		case "progress":
 			await body(args[0]).report?.(String(args[1]));
 			return true;

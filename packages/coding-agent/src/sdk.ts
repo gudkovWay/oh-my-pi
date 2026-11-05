@@ -50,6 +50,7 @@ import {
 	formatAdvisorMemoryPrompt,
 } from "./advisor";
 import { AsyncJobManager, type AsyncJobManagerApi } from "./async";
+import { createJobResultStore } from "./async/job-results";
 import { AutoLearnController, buildAutoLearnInstructions } from "./autolearn/controller";
 import { createAutoresearchExtension } from "./autoresearch";
 import { loadCapability, reset as resetCapabilities } from "./capability";
@@ -2486,6 +2487,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	const asyncJobManager = !options.parentTaskPrefix
 		? new AsyncJobManager({
 				maxRunningJobs: () => Math.min(100, cfgAsyncMaxJobs.get(settings)),
+				resultStore: createJobResultStore(sessionManager),
 			})
 		: undefined;
 	if (asyncJobManager) {

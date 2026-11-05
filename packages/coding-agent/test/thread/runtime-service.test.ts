@@ -4,11 +4,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { MessageChannel } from "node:worker_threads";
 import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, AsyncJobManager } from "../../src/async/job-manager";
+import { createJobResultStore } from "../../src/async/job-results";
 import { Settings } from "../../src/config/settings";
 import { AgentStorage } from "../../src/session/agent-storage";
 import { ArtifactManager } from "../../src/session/artifacts";
 import { CostGate } from "../../src/session/cost-gate";
 import { cfgSessionMaxCost } from "../../src/session/settings";
+import { SessionManager } from "../../src/session/session-manager";
 import type { MainThreadLink, SubagentMainApi, SubagentWorkerApi } from "../../src/thread/protocol";
 import { type RpcFrame, RpcLink } from "../../src/thread/rpc";
 import type { ThreadService, WorkerPeer } from "../../src/thread/services";
@@ -104,6 +106,24 @@ async function jobId(probe: Probe, manager: AsyncJobManager, ownerId: string, wi
 }
 
 describe("runtime thread services: async jobs", () => {
+	it("recovers an evicted worker result from the root journal without leaking another owner's receipt", async () => {
+		const journal = SessionManager.inMemory();
+		const manager = new AsyncJobManager({ retentionMs: 0, resultStore: createJobResultStore(journal) });
+		managers.push(manager);
+		const probe = await startWorker();
+		const id = await jobId(probe, manager, "Worker");
+		await probe("finish", id, "durable worker output");
+		await manager.waitForAll();
+		expect(manager.getJob(id)).toBeUndefined();
+		expect(await probe("retainedResult", manager, id, "Worker")).toMatchObject({
+			id,
+			ownerId: "Worker",
+			resultText: "durable worker output",
+		});
+		expect(await probe("retainedResult", manager, id, "OtherWorker")).toBeUndefined();
+		expect(await probe("deliveries")).toEqual([]);
+	});
+
 	it("runs a worker-registered job in the worker, visible on main, delivering to a worker sink", async () => {
 		const manager = newManager();
 		const probe = await startWorker();

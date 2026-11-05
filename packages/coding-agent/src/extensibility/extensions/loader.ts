@@ -142,6 +142,10 @@ export class ExtensionRuntime implements IExtensionRuntime {
 		throw new ExtensionRuntimeNotInitializedError();
 	}
 
+	captureEntryWriter(): (customType: string, data?: unknown) => Promise<void> {
+		throw new ExtensionRuntimeNotInitializedError();
+	}
+
 	setLabel(): void {
 		throw new ExtensionRuntimeNotInitializedError();
 	}
@@ -352,6 +356,10 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 
 	appendEntry(customType: string, data?: unknown): void {
 		this.runtime.appendEntry(customType, data);
+	}
+
+	captureEntryWriter(): (customType: string, data?: unknown) => Promise<void> {
+		return this.runtime.captureEntryWriter();
 	}
 
 	exec(command: string, args: string[], options?: ExecOptions) {

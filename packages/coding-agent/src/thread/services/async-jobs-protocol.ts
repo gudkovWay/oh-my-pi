@@ -27,6 +27,7 @@ import {
 	type AsyncJobRunResult,
 	type AsyncJobType,
 } from "../../async/job-manager";
+import type { JobResultReceipt } from "../../async/job-results";
 import type { JobWidgetBrief } from "../../job-widgets/types";
 import type { RpcMethod } from "../rpc";
 import type { WireCallback, WireUnsubscribe } from "./support";
@@ -134,6 +135,7 @@ export type AsyncJobManagerProtocol = {
 	>;
 	cancel: RpcMethod<[id: string, filter: AsyncJobFilter | undefined], boolean>;
 	getJob: RpcMethod<[id: string], AsyncJobWire | undefined>;
+	readResult: RpcMethod<[id: string, ownerId: string | undefined], JobResultReceipt | undefined>;
 	getRunningJobs: RpcMethod<[filter: AsyncJobFilter | undefined], AsyncJobWire[]>;
 	getRecentJobs: RpcMethod<[limit: number | undefined, filter: AsyncJobFilter | undefined], AsyncJobWire[]>;
 	getAllJobs: RpcMethod<[filter: AsyncJobFilter | undefined], AsyncJobWire[]>;
