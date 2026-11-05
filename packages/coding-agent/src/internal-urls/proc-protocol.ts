@@ -2,6 +2,7 @@ import { formatDuration } from "@oh-my-pi/pi-tui/render/render-utils";
 import type { DaemonSnapshot } from "@oh-my-pi/pi-tui/tools/daemon";
 import { formatBytes, logger, sanitizeText, truncate } from "@oh-my-pi/pi-utils";
 import type { AsyncJob } from "../async";
+import { readJobResult } from "../async/job-results";
 import {
 	agentStaleNote,
 	cancelAgentRegistration,
@@ -230,6 +231,8 @@ export class ProcProtocolHandler implements ProtocolHandler {
 			];
 			if (job.resultText) lines.push(job.resultText);
 			if (job.errorText) lines.push(`Error: ${job.errorText}`);
+			if (job.latestDetails?.resultPersistenceError)
+				lines.push(`Durable receipt unavailable: ${job.latestDetails.resultPersistenceError}`);
 			if (job.status === "running") {
 				const details = job.latestDetails;
 				if (typeof details?.output === "string") lines.push(details.output);
@@ -243,6 +246,21 @@ export class ProcProtocolHandler implements ProtocolHandler {
 			}
 			return textResource(url, lines.join("\n"), undefined, false, {
 				job: snapshot,
+				log: lines.slice(1).join("\n"),
+			});
+		}
+		const ownerId = session.getAgentId?.() ?? undefined;
+		const retained =
+			session.asyncJobManager?.readResult(id, ownerId) ?? readJobResult(session.sessionManager, id, ownerId);
+		if (retained) {
+			const lines = [
+				`${retained.id} [${retained.type}] — ${retained.status} — retained receipt (not a live job)`,
+				retained.label,
+			];
+			if (retained.resultText) lines.push(retained.resultText);
+			if (retained.errorText) lines.push(`Error: ${retained.errorText}`);
+			return textResource(url, lines.join("\n"), undefined, false, {
+				job: snapshotJobs(session, [retained])[0],
 				log: lines.slice(1).join("\n"),
 			});
 		}

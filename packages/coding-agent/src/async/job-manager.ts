@@ -5,6 +5,7 @@ import type { StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
 import type { OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { IrcBus } from "../irc/bus";
 import type { JobWidgetInputs, JobWidgetRegistry } from "../job-widgets/types";
+import type { AsyncJobResultStore, JobResultReceipt } from "./job-results";
 
 const DELIVERY_RETRY_BASE_MS = 500;
 const DELIVERY_RETRY_MAX_MS = 30_000;
@@ -184,6 +185,8 @@ export interface AsyncJobManagerOptions {
 	 * would leak one agent's result into another session.
 	 */
 	onJobComplete?: AsyncJobDeliverySink;
+	/** Capture an origin-bound writer and pair owner-scoped recovery with the same journal. */
+	resultStore?: AsyncJobResultStore;
 	/** Running-job cap; a function is re-read on every capacity check so a live setting resizes the cap. */
 	maxRunningJobs?: number | (() => number);
 	retentionMs?: number;
@@ -303,6 +306,12 @@ export class AsyncJobManager {
 	}
 
 	readonly #jobs = new Map<string, AsyncJob>();
+	readonly #usedJobIds: Set<string>;
+	readonly #recordedResults = new Set<string>();
+	readonly #resultStore: AsyncJobResultStore | undefined;
+	#resultSessionId: string | undefined;
+	readonly #resultWriters = new Map<string, (job: AsyncJob) => Promise<void>>();
+	readonly #resultWrites = new Map<string, Promise<void>>();
 	readonly #deliveries: AsyncJobDelivery[] = [];
 	readonly #inFlightDeliveries: AsyncJobDelivery[] = [];
 	readonly #suppressedDeliveries = new Set<string>();
@@ -352,6 +361,8 @@ export class AsyncJobManager {
 
 	constructor(options: AsyncJobManagerOptions) {
 		this.#onJobComplete = options.onJobComplete;
+		this.#resultStore = options.resultStore;
+		this.#usedJobIds = new Set();
 		this.#maxRunningJobsOption = options.maxRunningJobs;
 		this.#retentionMs = Math.max(0, Math.floor(options.retentionMs ?? DEFAULT_RETENTION_MS));
 		this.#retainedArtifactsCleanupGraceMs = Math.max(
@@ -435,6 +446,7 @@ export class AsyncJobManager {
 			queued: options?.queued === true,
 			...(options?.foreground ? { foreground: true } : {}),
 		};
+		if (this.#resultStore) this.#resultWriters.set(id, this.#resultStore.captureWriter());
 
 		const reportProgress = async (text: string, details?: AsyncJobDetails): Promise<void> => {
 			job.progressText = text;
@@ -472,6 +484,7 @@ export class AsyncJobManager {
 					job.status = "completed";
 					job.resultText = text;
 					this.#recordAgentReply(job);
+					await this.#recordResult(job);
 					this.#enqueueDelivery(id, text);
 				}
 			} catch (error) {
@@ -482,9 +495,11 @@ export class AsyncJobManager {
 				if (job.status !== "cancelled") {
 					job.status = "failed";
 					this.#recordAgentReply(job);
+					await this.#recordResult(job);
 					this.#enqueueDelivery(id, errorText);
 				}
 			}
+			if (job.status === "cancelled") await this.#recordResult(job);
 			if (this.#releasedForegroundJobs.has(id)) this.#discardForegroundJob(id);
 			else this.#scheduleEviction(id);
 			for (const listener of this.#settleListeners) {
@@ -532,9 +547,12 @@ export class AsyncJobManager {
 			agentOutputPublished: result.agentOutputPublished,
 		};
 		this.#jobs.set(id, job);
+		if (this.#resultStore) this.#resultWriters.set(id, this.#resultStore.captureWriter());
 		this.#recordAgentReply(job);
-		this.#enqueueDelivery(id, result.text);
-		this.#scheduleEviction(id);
+		job.promise = this.#recordResult(job).then(() => {
+			this.#enqueueDelivery(id, result.text);
+			this.#scheduleEviction(id);
+		});
 		return id;
 	}
 
@@ -545,6 +563,30 @@ export class AsyncJobManager {
 	 */
 	#recordAgentReply(job: AsyncJob): void {
 		if (job.agentId !== undefined && job.ownerId !== undefined) IrcBus.recordReply(job.agentId, job.ownerId);
+	}
+
+	#recordResult(job: AsyncJob): Promise<void> {
+		if (!this.#resultStore || job.foreground || this.#recordedResults.has(job.id)) return Promise.resolve();
+		const pending = this.#resultWrites.get(job.id);
+		if (pending) return pending;
+		const write = this.#resultWriters.get(job.id)!;
+		const completion = (async () => {
+			try {
+				await write(job);
+				this.#recordedResults.add(job.id);
+				this.#resultWriters.delete(job.id);
+			} catch (error) {
+				const problem = error instanceof Error ? error.message : String(error);
+				job.latestDetails = { ...job.latestDetails, resultPersistenceError: problem };
+				logger.error("Async job result could not be persisted", { jobId: job.id, error: problem });
+			}
+		})();
+		this.#resultWrites.set(job.id, completion);
+		return completion;
+	}
+
+	readResult(id: string, ownerId: string | undefined): JobResultReceipt | undefined {
+		return this.#resultStore?.read(id, ownerId);
 	}
 
 	/**
@@ -596,7 +638,10 @@ export class AsyncJobManager {
 		job.foreground = undefined;
 		this.#suppressedDeliveries.delete(jobId);
 		if (job.status === "completed" || job.status === "failed") {
-			this.#enqueueDelivery(jobId, job.status === "completed" ? (job.resultText ?? "") : (job.errorText ?? ""));
+			job.promise = this.#recordResult(job).then(() => {
+				this.#enqueueDelivery(jobId, job.status === "completed" ? (job.resultText ?? "") : (job.errorText ?? ""));
+				this.#scheduleEviction(jobId);
+			});
 		}
 		return true;
 	}
@@ -947,11 +992,17 @@ export class AsyncJobManager {
 	#discardForegroundJob(jobId: string): void {
 		this.#releasedForegroundJobs.delete(jobId);
 		this.#evictJob(jobId);
+		this.#usedJobIds.delete(jobId);
 		if (jobId === `bg_${this.#nextAutoId - 1}`) this.#nextAutoId -= 1;
 	}
 
 	#claimJobId(preferredId?: string): string {
+		if (this.#resultStore && this.#resultStore.sessionId !== this.#resultSessionId) {
+			for (const id of this.#resultStore.ids()) this.#usedJobIds.add(id);
+			this.#resultSessionId = this.#resultStore.sessionId;
+		}
 		const id = this.#resolveJobId(preferredId);
+		this.#usedJobIds.add(id);
 		this.#suppressedDeliveries.delete(id);
 		this.#consumedJobResults.delete(id);
 		this.#releasedForegroundJobs.delete(id);
@@ -966,16 +1017,16 @@ export class AsyncJobManager {
 			while (true) {
 				const id = `bg_${this.#nextAutoId}`;
 				this.#nextAutoId += 1;
-				if (!this.#jobs.has(id)) return id;
+				if (!this.#usedJobIds.has(id)) return id;
 			}
 		}
 
 		const base = preferredId.trim();
-		if (!this.#jobs.has(base)) return base;
+		if (!this.#usedJobIds.has(base)) return base;
 
 		let suffix = 2;
 		let candidate = `${base}-${suffix}`;
-		while (this.#jobs.has(candidate)) {
+		while (this.#usedJobIds.has(candidate)) {
 			suffix += 1;
 			candidate = `${base}-${suffix}`;
 		}
@@ -1076,6 +1127,7 @@ export class AsyncJobManager {
 	}
 
 	#evictJob(jobId: string): boolean {
+		if (this.#resultWrites.has(jobId) && !this.#recordedResults.has(jobId)) return false;
 		clearTimeout(this.#evictionTimers.get(jobId));
 		this.#evictionTimers.delete(jobId);
 		this.#suppressedDeliveries.delete(jobId);
@@ -1084,6 +1136,8 @@ export class AsyncJobManager {
 		const job = this.#jobs.get(jobId);
 		if (job) this.#runRetainedArtifactsCleanup(job);
 		this.widgets?.forget(jobId);
+		this.#resultWriters.delete(jobId);
+		this.#resultWrites.delete(jobId);
 		return this.#jobs.delete(jobId);
 	}
 

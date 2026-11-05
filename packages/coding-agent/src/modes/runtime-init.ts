@@ -120,6 +120,7 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 			appendEntry: (customType, data) => {
 				session.sessionManager.appendCustomEntry(customType, data);
 			},
+			captureEntryWriter: () => session.sessionManager.captureCustomEntryWriter(),
 			setLabel: (targetId, label) => {
 				session.sessionManager.appendLabelChange(targetId, label);
 			},
