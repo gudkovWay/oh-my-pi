@@ -43,6 +43,12 @@ import { FigureMarkdown } from "./figure-markdown";
 import { svgFigureRendering } from "./svg-figure";
 import { hasSvgFence } from "./svg-source";
 import { chartFence, hasChartTable, lookupTableChart, splitTableCharts } from "./table-chart";
+import {
+	hasImageReference,
+	imageReferenceDefinitions,
+	splitImageReferences,
+	type ImagePreviewResolver,
+} from "./image-reference-source";
 
 /**
  * Max wrapped rows of a turn-ending provider error rendered inline in the
@@ -615,10 +621,13 @@ export class AssistantMessageComponent extends Container {
 		linkTargets?: ReadonlyMap<string, string>,
 		expandThinkingBlocks = false,
 		textRendering?: AssistantTextRendering,
+		private readonly resolveImagePreview?: ImagePreviewResolver,
+		imagesVisible = true,
 	) {
 		super();
 		this.#hideThinkingBlock = hideThinkingBlock;
 		this.#onImageUpdate = onImageUpdate;
+		this.#showImages = imagesVisible;
 		this.#thinkingRenderers = thinkingRenderers;
 		this.#textRendering = textRendering?.renderers.length ? textRendering : undefined;
 		this.#textContentOffset = textRendering?.contentOffset ?? 0;
@@ -915,7 +924,7 @@ export class AssistantMessageComponent extends Container {
 			media,
 			getThemeEpoch(),
 		];
-		return this.#native.get(key, () => this.#describeMessage(tail, rate, media));
+		return this.#native.get(key, () => this.#describeMessage(tail, rate, media, cx));
 	}
 
 	/**
@@ -941,7 +950,7 @@ export class AssistantMessageComponent extends Container {
 		this.#nativeViewVersion++;
 	}
 
-	#describeMessage(thinkingTail: number | undefined, rate: number, media: boolean): NativeNode {
+	#describeMessage(thinkingTail: number | undefined, rate: number, media: boolean, cx?: DescribeContext): NativeNode {
 		const message = this.#displayedMessage;
 		const previousParts = this.#nativeParts;
 		const parts = new Map<string, { text: string; stream: boolean; node: NativeNode }>();
@@ -1000,22 +1009,36 @@ export class AssistantMessageComponent extends Container {
 						this.#nativeLinkSources.set(text, resolved);
 						return resolved;
 					};
-					if (!this.#showImages || !this.#showTableCharts || !hasChartTable(source)) {
-						children.push(markdown(`t${index}`, `t${index}`, linked(source, streaming), streaming));
-						continue;
-					}
-					// A chart follows its table as an ```svg figure the terminal colors; the prose splits around it.
-					const segments = splitTableCharts(source, streaming);
-					segments.forEach((segment, part) => {
-						const slot = part === 0 ? `t${index}` : `t${index}.${part}`;
-						if (segment.kind === "markdown") {
-							const live = streaming && part === segments.length - 1;
-							children.push(markdown(slot, slot, linked(segment.text.trim(), live), live));
+					const figure = this.#figureBlocks.get(index);
+					const references =
+						figure && this.resolveImagePreview
+							? splitImageReferences(source)
+							: [{ kind: "markdown" as const, text: source }];
+					const definitions = figure ? imageReferenceDefinitions(source) : "";
+					references.forEach((reference, referenceIndex) => {
+						const key = referenceIndex === 0 ? `t${index}` : `t${index}.${referenceIndex}`;
+						if (reference.kind === "image-reference") {
+							const preview = cx && figure?.describePreview(reference.href, cx);
+							if (preview) children.push(preview);
 							return;
 						}
-						const chart = lookupTableChart(segment.table);
-						if (chart instanceof Promise) this.#awaitChart(chart);
-						else if (chart) children.push(markdown(slot, slot, chartFence(chart), false));
+						const prose = definitions ? reference.text + "\n\n" + definitions : reference.text;
+						if (!this.#showImages || !this.#showTableCharts || !hasChartTable(prose)) {
+							children.push(markdown(key, key, linked(prose, streaming), streaming));
+							return;
+						}
+						const segments = splitTableCharts(prose, streaming);
+						segments.forEach((segment, part) => {
+							const slot = part === 0 ? key : `${key}.${part}`;
+							if (segment.kind === "markdown") {
+								const live = streaming && part === segments.length - 1;
+								children.push(markdown(slot, slot, linked(segment.text.trim(), live), live));
+								return;
+							}
+							const chart = lookupTableChart(segment.table);
+							if (chart instanceof Promise) this.#awaitChart(chart);
+							else if (chart) children.push(markdown(slot, slot, chartFence(chart), false));
+						});
 					});
 				} else if (content.type === "thinking") {
 					const display = resolveThinkingDisplay(content, this.#proseOnlyThinking);
@@ -1472,9 +1495,10 @@ export class AssistantMessageComponent extends Container {
 	#liftsFigures(text: string): boolean {
 		return (
 			this.#showImages &&
-			TERMINAL.imageProtocol !== null &&
-			!isNativeRendering() &&
-			((svgFigureRendering() && hasSvgFence(text)) || (this.#showTableCharts && hasChartTable(text)))
+			(TERMINAL.imageProtocol !== null || isNativeRendering()) &&
+			((this.resolveImagePreview !== undefined && hasImageReference(text)) ||
+				(!isNativeRendering() &&
+					((svgFigureRendering() && hasSvgFence(text)) || (this.#showTableCharts && hasChartTable(text)))))
 		);
 	}
 
@@ -1504,6 +1528,7 @@ export class AssistantMessageComponent extends Container {
 				markdown: value => this.#createMarkdown("text", value),
 				charts: this.#showTableCharts,
 				budget: this.#imageBudget,
+				resolveImagePreview: this.resolveImagePreview,
 				onChange: () => {
 					this.#blockVersion++;
 					this.#onImageUpdate?.();

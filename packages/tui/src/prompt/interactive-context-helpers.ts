@@ -6,6 +6,7 @@ import type { ImageBudget } from "../components/image";
 import type { AssistantTextRenderer, AssistantThinkingRenderer } from "../chat/extension-types";
 import { AssistantMessageComponent } from "../chat/assistant-message";
 import { ReplyWriteComponent } from "../chat/reply-write";
+import type { ImagePreviewResolver } from "../chat/image-reference-source";
 /** Session display capabilities supplied unchanged by the interactive host. */
 export interface AssistantMessageSession {
 	readonly model?: Model;
@@ -30,6 +31,7 @@ export interface AssistantMessageHost {
 	readonly ui: { requestRender(): void; readonly imageBudget: ImageBudget };
 	/** Resolve already-extracted Markdown link destinations to local targets. */
 	resolveAssistantMessageLinkHrefs(hrefs: readonly string[]): Promise<ReadonlyMap<string, string>>;
+	getAssistantImagePreviewResolver?(): ImagePreviewResolver;
 }
 
 const kMarkdownLinkTargets = Symbol("markdownLinkTargets");
@@ -134,6 +136,8 @@ export function createAssistantMessageComponent(
 		linkTargets,
 		ctx.expandThinkingBlocks,
 		{ renderers: ctx.viewSession.extensionRunner?.getAssistantTextRenderers?.() ?? [], contentOffset },
+		ctx.getAssistantImagePreviewResolver?.(),
+		ctx.assistantImagesVisible,
 	);
 	applyHostDisplay(ctx, component);
 	return component;

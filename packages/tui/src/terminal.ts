@@ -20,6 +20,7 @@ import { setKittyProtocolActive } from "./keys";
 import { encodeTspHelloQuery, parseTspMessage, TSP_PREFIX, type TspHello } from "./native/encode";
 import { StdinBuffer } from "./stdin-buffer";
 import {
+	isImageProtocolForced,
 	isInsideTerminalMultiplexer,
 	isSshSession,
 	NotifyProtocol,
@@ -726,6 +727,7 @@ export interface Terminal {
 	 * support discovered through another graphics query.
 	 */
 	onSixelSupport?(callback: (supported: boolean) => void): void;
+	onKittyGraphicsSupport?(callback: (supported: boolean) => void): void;
 	/**
 	 * Register a callback fired once the startup Glyph Protocol handshake
 	 * resolves (see {@link GlyphProtocolReportHandler}). A subscriber that
@@ -778,6 +780,7 @@ type Da1SentinelOwner =
 	| { kind: "drain"; answered: () => void };
 
 let nextOsc99ProbeId = 1;
+let nextKittyGraphicsProbeId = 0x7ffff000;
 
 function parseOsc99KeyValues(section: string): Map<string, string> {
 	const values = new Map<string, string>();
@@ -942,6 +945,11 @@ export class ProcessTerminal implements Terminal {
 	#glyphProtocolCallbacks: GlyphProtocolReportHandler[] = [];
 	#sixelSupport: boolean | undefined;
 	#sixelSupportCallbacks: Array<(supported: boolean) => void> = [];
+	#kittyGraphicsProbeId?: number;
+	#kittyGraphicsResult?: boolean;
+	#kittyGraphicsTimeout?: Timer;
+	#kittyGraphicsReplyBuffer = "";
+	#kittyGraphicsCallbacks: Array<(supported: boolean) => void> = [];
 	#tspPending = false;
 	#tspResult: TspHello | null | undefined;
 	#tspFallbackLogged = false;
@@ -1083,6 +1091,29 @@ export class ProcessTerminal implements Terminal {
 	onSixelSupport(callback: (supported: boolean) => void): void {
 		this.#sixelSupportCallbacks.push(callback);
 		if (this.#sixelSupport !== undefined) callback(this.#sixelSupport);
+	}
+
+	onKittyGraphicsSupport(callback: (supported: boolean) => void): void {
+		this.#kittyGraphicsCallbacks.push(callback);
+		if (this.#kittyGraphicsResult !== undefined) callback(this.#kittyGraphicsResult);
+	}
+
+	#queryKittyGraphics(): void {
+		const sessions = terminalMultiplexerSessions();
+		if (isImageProtocolForced() || sessions.length !== 1 || sessions[0]?.id !== "herdr") return;
+		this.#kittyGraphicsProbeId = nextKittyGraphicsProbeId++;
+		this.#kittyGraphicsResult = undefined;
+		this.#kittyGraphicsTimeout = setTimeout(() => this.#finishKittyGraphics(false), 250);
+		// a=q checks decoding without allocating a persistent image or placement.
+		this.#safeWrite(`\x1b_Ga=q,i=${this.#kittyGraphicsProbeId},s=1,v=1,t=d,f=32;/wAA/w==\x1b\\`);
+	}
+
+	#finishKittyGraphics(supported: boolean): void {
+		if (this.#kittyGraphicsResult !== undefined) return;
+		clearTimeout(this.#kittyGraphicsTimeout);
+		this.#kittyGraphicsTimeout = undefined;
+		this.#kittyGraphicsResult = supported;
+		for (const callback of this.#kittyGraphicsCallbacks) callback(supported);
 	}
 
 	onTspHello(callback: TspHelloHandler): void {
@@ -1258,6 +1289,7 @@ export class ProcessTerminal implements Terminal {
 		// Tern Surface Protocol `hello`, same DA1 sentinel FIFO. A reply switches
 		// the TUI to describing its UI instead of painting rows.
 		this.#queryTspSupport();
+		this.#queryKittyGraphics();
 
 		// Subscribe to Mode 2031 appearance change notifications.
 		// When the terminal reports a change, we re-query OSC 11 to get the
@@ -1699,6 +1731,22 @@ export class ProcessTerminal implements Terminal {
 					const [, meta, payload] = osc99Match;
 					this.#osc99ResponseBuffer = "";
 					this.#handleOsc99CapabilityResponse(meta!, payload!);
+					return;
+				}
+			}
+
+			if (this.#kittyGraphicsReplyBuffer || sequence.startsWith("\x1b_G")) {
+				if (this.#kittyGraphicsReplyBuffer && sequence.startsWith("\x1b") && sequence !== "\x1b\\") {
+					this.#kittyGraphicsReplyBuffer = "";
+				} else {
+					this.#kittyGraphicsReplyBuffer += sequence;
+					if (this.#kittyGraphicsReplyBuffer.length > 4096) this.#kittyGraphicsReplyBuffer = "";
+					if (!this.#kittyGraphicsReplyBuffer.endsWith("\x1b\\")) return;
+					const reply = this.#kittyGraphicsReplyBuffer.match(/^\x1b_Gi=(\d+);([^\x1b]*)\x1b\\$/);
+					this.#kittyGraphicsReplyBuffer = "";
+					if (reply && Number(reply[1]) === this.#kittyGraphicsProbeId) {
+						this.#finishKittyGraphics(reply[2] === "OK");
+					}
 					return;
 				}
 			}
@@ -2438,6 +2486,12 @@ export class ProcessTerminal implements Terminal {
 		this.#glyphProtocolCallbacks = [];
 		this.#sixelSupport = undefined;
 		this.#sixelSupportCallbacks = [];
+		clearTimeout(this.#kittyGraphicsTimeout);
+		this.#kittyGraphicsTimeout = undefined;
+		this.#kittyGraphicsProbeId = undefined;
+		this.#kittyGraphicsResult = undefined;
+		this.#kittyGraphicsReplyBuffer = "";
+		this.#kittyGraphicsCallbacks = [];
 		setTerminalGlyphProtocol(false);
 		this.#tspPending = false;
 		this.#endTspTmuxPane();
