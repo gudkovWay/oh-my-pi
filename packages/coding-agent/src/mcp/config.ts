@@ -4,6 +4,8 @@
  * Uses the capability system to load MCP servers from multiple sources.
  */
 
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
 import { getMCPConfigPath, logger } from "@oh-my-pi/pi-utils";
 import { mcpCapability } from "../capability/mcp";
 import type { EffectiveExtensionRoots, SourceMeta } from "../capability/types";
@@ -93,6 +95,62 @@ function convertToLegacyConfig(server: MCPServer): MCPServerConfig {
 	};
 }
 
+async function repositoryScopes(cwd: string, config: MCPConfigFile): Promise<Map<string, boolean>> {
+	const scopes = new Map<string, boolean>();
+	const directories = new Map<string, Promise<string | undefined>>();
+	const commonDir = (root: string): Promise<string | undefined> => {
+		let pending = directories.get(root);
+		if (!pending) {
+			pending = (async () => {
+				try {
+					const child = Bun.spawn(["git", "-C", root, "rev-parse", "--path-format=absolute", "--git-common-dir"], {
+						stdout: "pipe",
+						stderr: "ignore",
+						timeout: 5000,
+						env: {
+							...process.env,
+							GIT_DIR: undefined,
+							GIT_COMMON_DIR: undefined,
+							GIT_WORK_TREE: undefined,
+							GIT_INDEX_FILE: undefined,
+						},
+					});
+					const output = await new Response(child.stdout).text();
+					if ((await child.exited) !== 0) return;
+					return await fs.realpath(output.trim());
+				} catch {
+					return;
+				}
+			})();
+			directories.set(root, pending);
+		}
+		return pending;
+	};
+	for (const [name, server] of Object.entries(config.mcpServers ?? {})) {
+		if (!server || typeof server !== "object" || !Object.hasOwn(server, "repositoryRoots")) continue;
+		scopes.set(name, false);
+		const roots = server.repositoryRoots;
+		if (
+			!Array.isArray(roots) ||
+			!roots.length ||
+			roots.length > 32 ||
+			roots.some(root => typeof root !== "string" || !path.isAbsolute(root) || path.normalize(root) !== root)
+		) {
+			logger.warn("Invalid MCP repositoryRoots; server remains excluded", { name });
+			continue;
+		}
+		const current = await commonDir(cwd);
+		if (!current) continue;
+		for (const root of roots) {
+			if ((await commonDir(root)) === current) {
+				scopes.set(name, true);
+				break;
+			}
+		}
+	}
+	return scopes;
+}
+
 /**
  * Load all MCP server configs from standard locations.
  * Uses the capability system for multi-source discovery.
@@ -127,11 +185,12 @@ export async function loadAllMCPConfigs(cwd: string, options?: LoadMCPConfigsOpt
 	}
 	const disabledServers = new Set(Array.isArray(userConfig.disabledServers) ? userConfig.disabledServers : []);
 	const forcedEnabled = new Set(Array.isArray(userConfig.enabledServers) ? userConfig.enabledServers : []);
+	const repositories = await repositoryScopes(cwd, userConfig);
 
 	// Scope exclusions drop entries entirely BEFORE deduplication: with project
 	// config disabled, a project entry must not shadow anything.
 	const includeServer = (server: MCPServer & { _source: SourceMeta }): boolean =>
-		enableProjectConfig || server._source.level !== "project";
+		(enableProjectConfig || server._source.level !== "project") && repositories.get(server.name) !== false;
 
 	// Disabled servers are suppressed rather than dropped: they still own their
 	// name at key-level dedupe (a disabled project `foo` keeps a same-named,

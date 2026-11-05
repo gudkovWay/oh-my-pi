@@ -150,4 +150,60 @@ describe("MCP scope filtering precedes connection-equivalence deduplication", ()
 			await removeWithRetries(extensionDir);
 		}
 	});
+
+	test("repository root restrictions cover linked worktrees but exclude other and non-repositories", async () => {
+		const git = async (cwd: string, ...args: string[]) => {
+			const child = Bun.spawn(["git", "-C", cwd, ...args], { stdout: "pipe", stderr: "pipe" });
+			const error = await new Response(child.stderr).text();
+			expect(await child.exited, error).toBe(0);
+		};
+		await git(projectDir, "init", "-q");
+		await git(
+			projectDir,
+			"-c",
+			"user.name=Test",
+			"-c",
+			"user.email=test@example.invalid",
+			"-c",
+			"core.hooksPath=/dev/null",
+			"commit",
+			"--allow-empty",
+			"-qm",
+			"fixture",
+		);
+		const linked = path.join(tempHome, "linked");
+		await git(projectDir, "worktree", "add", "-qb", "DEV-capitalism-slave-mcp-fixture", linked);
+		await fs.mkdir(path.join(linked, "subdir"));
+		await writeMcpJson(userAgentDir, {
+			linear: { type: "http", url: "https://linear.example/mcp", repositoryRoots: [projectDir] },
+		});
+		for (const cwd of [projectDir, linked, path.join(linked, "subdir")]) {
+			clearFsCache();
+			const loaded = await loadAllMCPConfigs(cwd, { filterExa: false });
+			expect(loaded.configs.linear).toMatchObject({ url: "https://linear.example/mcp" });
+		}
+		const unrelated = path.join(tempHome, "other", path.basename(projectDir));
+		await fs.mkdir(unrelated, { recursive: true });
+		await git(unrelated, "init", "-q");
+		for (const cwd of [unrelated, tempHome]) {
+			clearFsCache();
+			const loaded = await loadAllMCPConfigs(cwd, { filterExa: false });
+			expect(loaded.configs.linear).toBeUndefined();
+		}
+	});
+
+	test("invalid repository root restrictions fail closed even with force-enable", async () => {
+		for (const roots of [[], ["."], ["*"], "anywhere", [projectDir, 42]]) {
+			clearFsCache();
+			await fs.writeFile(
+				path.join(userAgentDir, "mcp.json"),
+				JSON.stringify({
+					enabledServers: ["linear"],
+					mcpServers: { linear: { type: "http", url: "https://linear.example/mcp", repositoryRoots: roots } },
+				}),
+			);
+			const loaded = await loadAllMCPConfigs(projectDir, { filterExa: false });
+			expect(loaded.configs.linear).toBeUndefined();
+		}
+	});
 });
