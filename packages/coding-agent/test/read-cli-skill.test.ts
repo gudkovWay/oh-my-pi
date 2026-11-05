@@ -63,6 +63,48 @@ describe("omp read skill resources", () => {
 		expect(error).toBe("");
 	}, 60_000);
 
+	it("reads local rules in mixed requests without starting MCP", async () => {
+		const rules = path.join(agentDir, "rules");
+		await fs.mkdir(rules, { recursive: true });
+		await Bun.write(
+			path.join(rules, "standalone-rule.md"),
+			"---\ndescription: Readable CLI rule.\n---\n\n# Standalone Rule\n",
+		);
+		const marker = path.join(root, "rule-mcp-started");
+		await Bun.write(
+			path.join(projectDir, ".mcp.json"),
+			JSON.stringify({
+				mcpServers: {
+					probe: {
+						command: process.execPath,
+						args: ["-e", `require("node:fs").writeFileSync(${JSON.stringify(marker)}, "")`],
+					},
+				},
+			}),
+		);
+		const result = await runReadProbe("skill://standalone-skill;rule://standalone-rule");
+		expect(result.exitCode).toBe(0);
+		expect(result.output).toContain("# Standalone Skill");
+		expect(result.output).toContain("# Standalone Rule");
+		expect(await Bun.file(marker).exists()).toBe(false);
+	}, 60_000);
+
+	it("does not expose disabled or subagent-only rules through the CLI", async () => {
+		const rules = path.join(agentDir, "rules");
+		await fs.mkdir(rules, { recursive: true });
+		await Bun.write(path.join(rules, "disabled.md"), "---\ndescription: Disabled.\n---\n\n# Hidden Disabled Rule\n");
+		await Bun.write(
+			path.join(rules, "child-only.md"),
+			"---\ndescription: Child only.\nagents: [scout]\n---\n\n# Hidden Child Rule\n",
+		);
+		await Bun.write(path.join(agentDir, "config.yml"), "ttsr:\n  disabledRules: [disabled]\n");
+		for (const name of ["disabled", "child-only"]) {
+			const result = await runReadProbe(`rule://${name}`);
+			expect(result.exitCode).toBe(1);
+			expect(result.output).not.toContain("# Hidden");
+		}
+	}, 60_000);
+
 	it("starts MCP servers only for a skill URL no local skill owns", async () => {
 		const marker = path.join(root, "mcp-started");
 		await Bun.write(
