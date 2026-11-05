@@ -5,6 +5,13 @@ import goalModeActivePrompt from "../prompts/goals/goal-mode-active.md" with { t
 import type { Goal } from "@oh-my-pi/pi-tui/tools/goal";
 import type { GoalBudgetSteering, GoalModeState, GoalRuntimeEvent, GoalTokenUsage } from "./state";
 
+export interface GoalTransition {
+	type: "goal_transition";
+	phase: "before" | "after";
+	operation: "create" | "replace" | "resume" | "pause" | "drop" | "complete";
+	goal: Goal;
+}
+
 export interface GoalRuntimeHost {
 	getState(): GoalModeState | undefined;
 	setState(state: GoalModeState | undefined): void;
@@ -17,6 +24,7 @@ export interface GoalRuntimeHost {
 		deliverAs?: "steer" | "followUp" | "nextTurn";
 	}): Promise<void>;
 	now?(): number;
+	transition?(event: GoalTransition): Promise<void>;
 }
 
 export interface GoalTurnSnapshot {
@@ -117,6 +125,9 @@ function isAccountingStatus(goal: Goal): boolean {
 
 export class GoalRuntime {
 	readonly #host: GoalRuntimeHost;
+	getState(): GoalModeState | undefined {
+		return this.#getStateClone();
+	}
 	#turnSnapshot: GoalTurnSnapshot | undefined;
 	#wallClock: GoalWallClockSnapshot;
 	#budgetReportedFor: string | undefined;
@@ -255,12 +266,24 @@ export class GoalRuntime {
 			if (options?.reason !== "interrupted") return;
 			const cloned = this.#getStateClone();
 			if (!cloned?.enabled || cloned.goal.status !== "active") return;
+			await this.#host.transition?.({
+				type: "goal_transition",
+				phase: "before",
+				operation: "pause",
+				goal: cloneGoal(cloned.goal),
+			});
 			cloned.enabled = false;
 			cloned.goal.status = "paused";
 			cloned.goal.updatedAt = this.#now();
 			this.#clearActiveAccounting();
 			this.#budgetReportedFor = undefined;
 			await this.#commitState(cloned, { persist: "goal_paused" });
+			await this.#host.transition?.({
+				type: "goal_transition",
+				phase: "after",
+				operation: "pause",
+				goal: cloneGoal(cloned.goal),
+			});
 		});
 	}
 
@@ -273,12 +296,24 @@ export class GoalRuntime {
 			return state;
 		}
 		if (state.goal.status === "active") {
+			await this.#host.transition?.({
+				type: "goal_transition",
+				phase: "before",
+				operation: "pause",
+				goal: cloneGoal(state.goal),
+			});
 			state.enabled = false;
 			state.goal.status = "paused";
 			state.goal.updatedAt = this.#now();
 			this.#clearActiveAccounting();
 			this.#budgetReportedFor = undefined;
 			await this.#commitState(state, { persist: "goal_paused" });
+			await this.#host.transition?.({
+				type: "goal_transition",
+				phase: "after",
+				operation: "pause",
+				goal: cloneGoal(state.goal),
+			});
 			return state;
 		}
 		if (state.enabled && isAccountingStatus(state.goal)) {
@@ -400,9 +435,21 @@ export class GoalRuntime {
 				throw new Error("cannot create a new goal because this session already has a goal");
 			}
 			const state = this.#createGoalState(objective, input.tokenBudget);
+			await this.#host.transition?.({
+				type: "goal_transition",
+				phase: "before",
+				operation: "create",
+				goal: cloneGoal(state.goal),
+			});
 			this.#budgetReportedFor = undefined;
 			this.#markActiveAccounting(state.goal);
 			await this.#commitState(state, { persist: "goal" });
+			await this.#host.transition?.({
+				type: "goal_transition",
+				phase: "after",
+				operation: "create",
+				goal: cloneGoal(state.goal),
+			});
 			return state;
 		});
 	}
@@ -418,9 +465,21 @@ export class GoalRuntime {
 			}
 			await this.#flushUsageLocked("suppressed");
 			const state = this.#createGoalState(objective, input.tokenBudget);
+			await this.#host.transition?.({
+				type: "goal_transition",
+				phase: "before",
+				operation: "replace",
+				goal: cloneGoal(state.goal),
+			});
 			this.#budgetReportedFor = undefined;
 			this.#markActiveAccounting(state.goal);
 			await this.#commitState(state, { persist: "goal" });
+			await this.#host.transition?.({
+				type: "goal_transition",
+				phase: "after",
+				operation: "replace",
+				goal: cloneGoal(state.goal),
+			});
 			return state;
 		});
 	}
@@ -430,6 +489,12 @@ export class GoalRuntime {
 			const state = this.#getStateClone();
 			if (!state?.goal) throw new Error("No paused goal.");
 			if (state.goal.status === "complete") throw new Error("Goal is already complete.");
+			await this.#host.transition?.({
+				type: "goal_transition",
+				phase: "before",
+				operation: "resume",
+				goal: cloneGoal(state.goal),
+			});
 			state.enabled = true;
 			state.mode = "active";
 			state.reason = undefined;
@@ -438,6 +503,12 @@ export class GoalRuntime {
 			this.#budgetReportedFor = undefined;
 			this.#markActiveAccounting(state.goal);
 			await this.#commitState(state, { persist: "goal" });
+			await this.#host.transition?.({
+				type: "goal_transition",
+				phase: "after",
+				operation: "resume",
+				goal: cloneGoal(state.goal),
+			});
 			return state;
 		});
 	}
@@ -447,6 +518,12 @@ export class GoalRuntime {
 			await this.#flushUsageLocked("suppressed");
 			const state = this.#getStateClone();
 			if (!state?.goal) return undefined;
+			await this.#host.transition?.({
+				type: "goal_transition",
+				phase: "before",
+				operation: "pause",
+				goal: cloneGoal(state.goal),
+			});
 			state.enabled = false;
 			state.mode = "active";
 			state.reason = undefined;
@@ -457,6 +534,12 @@ export class GoalRuntime {
 			this.#clearActiveAccounting();
 			this.#budgetReportedFor = undefined;
 			await this.#commitState(state, { persist: "goal_paused" });
+			await this.#host.transition?.({
+				type: "goal_transition",
+				phase: "after",
+				operation: "pause",
+				goal: cloneGoal(state.goal),
+			});
 			return state;
 		});
 	}
@@ -466,6 +549,12 @@ export class GoalRuntime {
 			await this.#flushUsageLocked("suppressed");
 			const state = this.#getStateClone();
 			if (!state?.goal) return undefined;
+			await this.#host.transition?.({
+				type: "goal_transition",
+				phase: "before",
+				operation: "drop",
+				goal: cloneGoal(state.goal),
+			});
 			const dropped = { ...state.goal, status: "dropped" as const, updatedAt: this.#now() };
 			this.#clearActiveAccounting();
 			this.#budgetReportedFor = undefined;
@@ -475,6 +564,7 @@ export class GoalRuntime {
 				state: { ...state, enabled: false, goal: dropped },
 			});
 			await this.#commitState(undefined, { persist: "none", emit: false });
+			await this.#host.transition?.({ type: "goal_transition", phase: "after", operation: "drop", goal: dropped });
 			return dropped;
 		});
 	}
@@ -492,6 +582,12 @@ export class GoalRuntime {
 			if (state.goal.status === "dropped") {
 				throw new Error("cannot complete a dropped goal");
 			}
+			await this.#host.transition?.({
+				type: "goal_transition",
+				phase: "before",
+				operation: "complete",
+				goal: cloneGoal(state.goal),
+			});
 			state.enabled = false;
 			state.goal.status = "complete";
 			state.goal.updatedAt = this.#now();
@@ -500,6 +596,12 @@ export class GoalRuntime {
 			this.#clearActiveAccounting();
 			this.#budgetReportedFor = undefined;
 			await this.#commitState(state, { persist: "goal" });
+			await this.#host.transition?.({
+				type: "goal_transition",
+				phase: "after",
+				operation: "complete",
+				goal: cloneGoal(state.goal),
+			});
 			return state.goal;
 		});
 	}

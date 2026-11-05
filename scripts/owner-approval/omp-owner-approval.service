@@ -1,0 +1,31 @@
+[Unit]
+Description=OMP authenticated owner-policy approval broker
+After=dbus.service polkit.service
+Requires=dbus.service
+
+[Service]
+Type=dbus
+BusName=org.omp.OwnerApproval1
+ExecStart=/usr/bin/python3 -I /usr/local/lib/omp-owner-approval/broker.py
+User=root
+Group=root
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_SYS_PTRACE
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryMax=64M
+TasksMax=16
+CPUQuota=10%
+TimeoutStartSec=15
+TimeoutStopSec=5
+
+[Install]
+WantedBy=multi-user.target

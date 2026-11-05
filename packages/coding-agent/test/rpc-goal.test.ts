@@ -49,6 +49,7 @@ describe("RPC goal command", () => {
 		script?: "complete" | "idle" | "slow";
 		plan?: boolean;
 		persist?: boolean;
+		night?: boolean;
 	}): Promise<RpcClient> {
 		directory = await fs.mkdtemp(path.join(os.tmpdir(), "omp-rpc-goal-"));
 		client = new RpcClient({
@@ -61,6 +62,7 @@ describe("RPC goal command", () => {
 				GOAL_RPC_SCRIPT: options.script ?? "complete",
 				GOAL_RPC_PLAN: options.plan ? "1" : "0",
 				GOAL_RPC_PERSIST: options.persist ? "1" : "0",
+				GOAL_RPC_NIGHT: options.night ? "1" : "0",
 			},
 		});
 		await client.start();
@@ -82,6 +84,21 @@ describe("RPC goal command", () => {
 		// Continuation is off: nothing ran, so no model turn happened.
 		expect(state.messageCount).toBe(0);
 		expect(state.isStreaming).toBe(false);
+	}, 30_000);
+
+	test("night-edits enters the native lifecycle through the user command without a second driver", async () => {
+		const rpc = await start({ continuation: false, script: "idle", night: true });
+		await rpc.promptAndWait("/night-edits Ship verified work");
+		const active = await rpc.goal("get");
+		expect(active.goal).toMatchObject({ objective: "Ship verified work", status: "active" });
+		expect((await rpc.getState()).dumpTools?.map(tool => tool.name)).toContain("goal");
+		await rpc.goal("pause");
+		expect((await rpc.goal("get")).goal?.status).toBe("paused");
+		await rpc.goal("resume");
+		expect((await rpc.goal("get")).goal?.id).toBe(active.goal?.id);
+		await rpc.goal("drop");
+		expect((await rpc.goal("get")).goal).toBeNull();
+		expect((await rpc.getState()).dumpTools?.map(tool => tool.name)).not.toContain("goal");
 	}, 30_000);
 
 	test("plan mode refuses create and resume", async () => {

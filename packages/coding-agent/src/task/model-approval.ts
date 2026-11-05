@@ -67,6 +67,8 @@ export interface PerCallModelGrants {
 	parentModelPattern?: string;
 	/** Spawn-time selector preferences; unrelated later model usage cannot change a grant. */
 	matchPreferences?: ModelMatchPreferences;
+	/** Native goal may defer a missing settings grant to its mandatory live dispatch guard; never a persisted grant. */
+	requiresScopedAuthorization?: boolean;
 }
 
 type ApprovalRegistry = Pick<ModelRegistry, "getAll" | "getAvailable">;

@@ -6,6 +6,7 @@ import { createMockModel, type MockResponse, type MockResponseSource } from "@oh
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import type { GoalModeState } from "../../src/goals/state";
 import { resolveThresholdTokens, shouldCompact } from "@oh-my-pi/pi-agent-core/compaction";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -225,6 +226,8 @@ interface ReviveOwnerOptions {
 	modelRegistry?: ModelRegistry;
 	settings?: Settings;
 	sessionAgents?: readonly AgentDefinition[];
+	goalState?: GoalModeState;
+	dispatchAuthorization?: ExtensionRunner["emitBeforeSubagentSpawn"];
 }
 
 function createFactory(cwd: string, eventBus?: EventBus, owner: ReviveOwnerOptions = {}) {
@@ -250,6 +253,10 @@ function createFactory(cwd: string, eventBus?: EventBus, owner: ReviveOwnerOptio
 			return owner.preparedExtensions;
 		},
 		getSessionAgents: () => owner.sessionAgents ?? [],
+		getGoalModeState: () => owner.goalState,
+		extensionRunner: owner.dispatchAuthorization
+			? { emitBeforeSubagentSpawn: owner.dispatchAuthorization }
+			: undefined,
 	} as unknown as AgentSession;
 	return createPersistedSubagentReviverFactory({
 		session: parentSession,
@@ -635,6 +642,51 @@ describe("persisted subagent revival", () => {
 			getAvailable: () => models,
 			getAll: () => models,
 		}) as unknown as ModelRegistry;
+
+	it("cold revival reacquires goal authorization and refuses an inactive goal", async () => {
+		const cwd = makeTempDir("@pi-revive-goal-authority-");
+		const file = await createPersistedSession(cwd);
+		const journal = await SessionManager.open(file);
+		journal.appendCustomEntry("subagent-dispatch-guard", { goalId: "goal", patterns: ["mock/target:high"] });
+		await journal.close();
+		const ref = createRef(file);
+		const unavailable = await createFactory(cwd)(ref);
+		expect(unavailable).toBeDefined();
+		await expect(unavailable!(ref)).rejects.toThrow("inactive or different goal");
+		let captured: CreateAgentSessionOptions | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			captured = options;
+			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
+		});
+		const goalState: GoalModeState = {
+			enabled: true,
+			mode: "active",
+			goal: {
+				id: "goal",
+				objective: "Ship",
+				status: "active",
+				tokensUsed: 0,
+				timeUsedSeconds: 0,
+				createdAt: 0,
+				updatedAt: 0,
+			},
+		};
+		const reviver = await createFactory(cwd, undefined, {
+			goalState,
+			dispatchAuthorization: async () => ({
+				assertDispatch: async () => {
+					if (!goalState.enabled) throw new Error("revoked");
+				},
+			}),
+		})(ref);
+		await reviver!(ref);
+		expect(captured?.disableModelFallback).toBe(true);
+		expect(captured?.assertDispatchModel).toBeDefined();
+		goalState.enabled = false;
+		await expect(
+			Promise.resolve(captured!.assertDispatchModel!(getBundledModel("anthropic", "claude-sonnet-4-5"))),
+		).rejects.toThrow("revoked");
+	});
 
 	it("re-checks a revived per-call worker against current grants and keeps it off fallbacks", async () => {
 		const own = getBundledModel("anthropic", "claude-sonnet-4-5");
@@ -1948,6 +2000,8 @@ describe("cold revival replays the system prompt the last request sent", () => {
 			toolRegistry: new Map(tools.map(tool => [tool.name, tool])),
 			extensionRunner: {
 				initialize: () => {},
+				bindGoalRuntime: () => {},
+				emitGoalTransition: async () => {},
 				onError: () => () => {},
 				hasHandlers: () => false,
 				emit: async (event: { type: string }) => {
@@ -2011,7 +2065,7 @@ describe("cold revival replays the system prompt the last request sent", () => {
 			enableLsp: false,
 			artifactsDir: cwd,
 		});
-		expect(result.exitCode).toBe(0);
+		expect(result.exitCode, result.output).toBe(0);
 		if (!spawned) throw new Error("Expected the spawn to create a session");
 		return spawned;
 	}
@@ -2318,7 +2372,7 @@ describe("cold revival replays the system prompt the last request sent", () => {
 			sessionFile: parentFile,
 			artifactsDir: childrenDir,
 		});
-		expect(result.exitCode).toBe(0);
+		expect(result.exitCode, result.output).toBe(0);
 
 		const restored = new AgentRegistry();
 		await registerPersistedSubagents(restored, parentFile);

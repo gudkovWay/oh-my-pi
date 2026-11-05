@@ -10,7 +10,7 @@ import * as fs from "node:fs/promises";
 import path from "node:path";
 import type { AgentEvent, AgentIdentity, AgentMessage, AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
 import { AgentBusyError, recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
-import type { Api, Model, ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
+import type { Api, Model, ServiceTierByFamily, SimpleStreamOptions, Usage } from "@oh-my-pi/pi-ai";
 import { isCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { isRecord, logger, popLoopPhase, prompt, pushLoopPhase, sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
 import {
@@ -22,6 +22,7 @@ import {
 import type { Rule } from "../capability/rule";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import { ModelRegistry } from "../config/model-registry";
+import type { BeforeSubagentSpawnEventResult } from "../extensibility/extensions/types";
 import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import {
 	previewLine,
@@ -458,6 +459,8 @@ export interface ExecutorOptions {
 	parentActiveModelPattern?: string;
 	/** Set for a per-call `model`; every model the child sends to must stay approved by these grants. */
 	perCallModelGrants?: PerCallModelGrants;
+	assertDispatch?: BeforeSubagentSpawnEventResult["assertDispatch"];
+	dispatchGoalId?: string;
 	thinkingLevel?: ConfiguredThinkingLevel;
 	/** Caller-requested coarse effort (`lo`/`med`/`hi`); maps onto the resolved model's supported thinking range and wins over {@link thinkingLevel}. */
 	effort?: TaskEffort;
@@ -4675,7 +4678,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			}
 			// Preflight skips these checks while the registry is cold, so hold the model
 			// a per-call child actually starts on to them before its session exists.
-			if (options.perCallModelGrants && model) {
+			if (options.perCallModelGrants && model && !options.perCallModelGrants.requiresScopedAuthorization) {
 				assertPerCallModelApproved(model, options.perCallModelGrants, modelRegistry);
 			}
 			// The exact-name `task.agentServiceTierOverrides` entry dispatch resolved
@@ -4869,12 +4872,19 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 					modelPatternDefaultFallbackChain:
 						model || modelOverride === undefined ? undefined : inheritedRetryFallbackChain,
 					thinkingLevel: effectiveThinkingLevel,
-					...(perCallModelGrants
+					...(perCallModelGrants || options.assertDispatch
 						? {
-								// Every request stays on an approved model that can run at or below the spawn's effort ceiling.
-								assertDispatchModel: (dispatchModel: Model) => {
-									assertPerCallModelApproved(dispatchModel, perCallModelGrants, modelRegistry);
-									if (spawnEffortCeiling) assertModelSupportsEffortCeiling(dispatchModel, spawnEffortCeiling);
+								assertDispatchModel: async (dispatchModel: Model, streamOptions?: SimpleStreamOptions) => {
+									if (perCallModelGrants) {
+										if (!perCallModelGrants.requiresScopedAuthorization)
+											assertPerCallModelApproved(dispatchModel, perCallModelGrants, modelRegistry);
+										if (spawnEffortCeiling)
+											assertModelSupportsEffortCeiling(dispatchModel, spawnEffortCeiling);
+									}
+									await options.assertDispatch?.(dispatchModel, {
+										reasoning: streamOptions?.reasoning,
+										serviceTier: streamOptions?.serviceTier,
+									});
 								},
 								disableModelFallback: true,
 								disableServerSideFallback: true,
@@ -4948,6 +4958,12 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			};
 
 			const sessionManager = await awaitAbortable(sessionManagerPromise);
+			if (options.assertDispatch) {
+				sessionManager.appendCustomEntry("subagent-dispatch-guard", {
+					goalId: options.dispatchGoalId,
+					patterns: modelPatterns,
+				});
+			}
 			if (preparedSession) openedSessionManager = sessionManager;
 			if (options.parentArtifactManager && !preparedSession) {
 				sessionManager.adoptArtifactManager(options.parentArtifactManager);

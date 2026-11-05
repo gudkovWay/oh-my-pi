@@ -39,6 +39,24 @@ import {
 	validateProviderMaxInFlightRequests,
 } from "./settings";
 
+export function withDispatchAuthorization(
+	stream: StreamFn,
+	assertDispatch?: (model: Model, options?: SimpleStreamOptions) => void | Promise<void>,
+): StreamFn {
+	if (!assertDispatch) return stream;
+	return async (model, context, options) => {
+		await assertDispatch(model, options);
+		return stream(model, context, {
+			...options,
+			onPayload: async (payload, payloadModel, signal) => {
+				const replacement = await options?.onPayload?.(payload, payloadModel, signal);
+				await assertDispatch(payloadModel ?? model, options);
+				return replacement;
+			},
+		});
+	};
+}
+
 /** Apply each API's setting once; standard Responses preferences can only narrow it. */
 export function resolveWebsocketPreference(
 	settings: Settings,

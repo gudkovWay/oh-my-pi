@@ -181,6 +181,7 @@ import { expandSlashCommand, type FileSlashCommand, loadSlashCommands } from "..
 import { normalizeToolEventInput, resolveToolEventInput } from "../extensibility/tool-event-input";
 import { GoalRuntime } from "../goals/runtime";
 import type { GoalModeState, GoalTokenUsage } from "../goals/state";
+import { cfgGoalEnabled } from "../goals/settings";
 import type { HindsightSessionState } from "../hindsight/state";
 import { InternalUrlRouter, type LocalProtocolOptions } from "../internal-urls";
 import { type ChainJudge, hasNativeJudge, journalJudgmentUsage, resolveJudge, sharedJudgmentCache } from "../judgment";
@@ -1123,6 +1124,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#vibeModeState: VibeModeState | undefined;
 	#goalModeState: GoalModeState | undefined;
 	#goalRuntime: GoalRuntime;
+	#goalPreviousTools?: string[];
 	readonly #advisors: SessionAdvisors;
 	/** Resolves once the resume-time advisor spend backfill settles. */
 	#advisorCostRestore: Promise<void> = Promise.resolve();
@@ -2724,6 +2726,27 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				this.#goalModeState = state;
 			},
 			getCurrentUsage: () => this.#goalUsage(),
+			transition: async event => {
+				if (event.phase === "before" && ["create", "replace", "resume"].includes(event.operation)) {
+					if (!cfgGoalEnabled.get(this.settings)) throw new Error("Goal mode is disabled.");
+					if (this.getPlanModeState()?.enabled || this.#vibeModeState?.enabled) {
+						throw new Error("Exit plan/vibe mode before starting a goal.");
+					}
+				}
+				await this.#extensionRunner?.emitGoalTransition(event);
+				if (event.phase !== "after") return;
+				if (event.operation === "create" || event.operation === "resume") {
+					const tools = this.getEnabledToolNames();
+					if (!tools.includes("goal")) {
+						this.#goalPreviousTools = tools;
+						await this.setActiveToolsByName([...tools, "goal"]);
+					}
+				} else if (["pause", "drop", "complete"].includes(event.operation) && this.#goalPreviousTools) {
+					const tools = this.#goalPreviousTools;
+					this.#goalPreviousTools = undefined;
+					await this.setActiveToolsByName(tools);
+				}
+			},
 			emit: event => {
 				if (event.type === "goal_updated") {
 					return this.#emitSessionEvent({ type: "goal_updated", goal: event.goal, state: event.state });
@@ -2748,6 +2771,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				);
 			},
 		});
+		this.#extensionRunner?.bindGoalRuntime(this.#goalRuntime);
 		this.#cancelExitRecorder = postmortem.register(`agent-session:${this.sessionManager.getSessionId()}`, reason => {
 			this.#recordSessionExit(reason);
 		});
