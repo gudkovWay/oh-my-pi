@@ -42,6 +42,11 @@ import type { InteractiveModeContext } from "../../modes/types";
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import type { AgentSessionEvent } from "../../session/agent-session";
 import {
+	parseWorktrunkSelection,
+	validateWorktrunkSelection,
+	type WorktrunkSelection,
+} from "../../session/worktrunk-selection";
+import {
 	isSilentAbort,
 	isUserInvokedSkillPrompt,
 	isUserTurnInitiator,
@@ -201,6 +206,8 @@ export class EventController {
 	readonly #turnUsage = new TurnUsageTally();
 	/** When the last completed run ended; stale `#turnStartedAt` anchors are cleared against it. */
 	#lastAgentEndAt: number | undefined = undefined;
+	#worktrunkCalls = new Map<string, { command: string; sessionId: string; cwd: string }>();
+	#pendingWorktrunkMove: { selection: WorktrunkSelection; sessionId: string; cwd: string } | undefined;
 	// Count of visible assistant content blocks (rendered non-empty text/thinking)
 	// already seen in the current streaming message. A newly appearing one breaks
 	// the read run: the rendered reasoning/answer is a visual separator, so reads
@@ -1975,6 +1982,18 @@ export class EventController {
 
 	async #handleToolExecutionStart(event: Extract<AgentSessionEvent, { type: "tool_execution_start" }>): Promise<void> {
 		if (this.#retractedToolCallIds.has(event.toolCallId)) return;
+		if (
+			event.toolName === "bash" &&
+			this.ctx.viewSession === this.ctx.session &&
+			isRecord(event.args) &&
+			typeof event.args.command === "string"
+		) {
+			this.#worktrunkCalls.set(event.toolCallId, {
+				command: event.args.command,
+				sessionId: this.ctx.sessionManager.getSessionId(),
+				cwd: this.ctx.sessionManager.getCwd(),
+			});
+		}
 		this.#ensureWorkingLoaderWhileStreaming();
 		this.#updateWorkingMessageFromIntent(event.intent);
 		const tool = this.ctx.viewSession.getToolByName(event.toolName);
@@ -2193,6 +2212,13 @@ export class EventController {
 	}
 
 	async #handleToolExecutionEnd(event: Extract<AgentSessionEvent, { type: "tool_execution_end" }>): Promise<void> {
+		const worktrunk = this.#worktrunkCalls.get(event.toolCallId);
+		this.#worktrunkCalls.delete(event.toolCallId);
+		if (worktrunk && !event.isError) {
+			const output = textContent(event.result.content, "\n");
+			const selection = parseWorktrunkSelection(worktrunk.command, output);
+			if (selection) this.#pendingWorktrunkMove = { selection, sessionId: worktrunk.sessionId, cwd: worktrunk.cwd };
+		}
 		// `createAbortedToolResult` emits start/end after an error/aborted
 		// assistant message. The matching card was deliberately retracted at
 		// message_end; consume the completion instead of recreating/updating UI.
@@ -2570,6 +2596,31 @@ export class EventController {
 		this.#runActive = this.ctx.viewSession.isStreaming;
 		this.#syncComposerActivity();
 		await this.ctx.flushPendingModelSwitch();
+		const pendingMove = this.#pendingWorktrunkMove;
+		if (pendingMove && !this.ctx.session.isStreaming && this.ctx.viewSession === this.ctx.session) {
+			this.#pendingWorktrunkMove = undefined;
+			if (
+				pendingMove.sessionId === this.ctx.sessionManager.getSessionId() &&
+				pendingMove.cwd === this.ctx.sessionManager.getCwd()
+			) {
+				try {
+					const target = await validateWorktrunkSelection(pendingMove.cwd, pendingMove.selection);
+					if (
+						pendingMove.sessionId === this.ctx.sessionManager.getSessionId() &&
+						pendingMove.cwd === this.ctx.sessionManager.getCwd() &&
+						this.ctx.viewSession === this.ctx.session
+					) {
+						if (this.ctx.session.isStreaming) this.#pendingWorktrunkMove ??= pendingMove;
+						else await this.ctx.handleMoveCommand(target);
+					}
+				} catch (error) {
+					this.ctx.showWarning(
+						`Worktrunk session move was not applied: ${error instanceof Error ? error.message : String(error)}`,
+					);
+				}
+			}
+		}
+		this.#worktrunkCalls.clear();
 		this.#sealAbandonedForegroundTools();
 		this.#blockingPrompts.clear();
 		this.#readToolCallArgs.clear();
