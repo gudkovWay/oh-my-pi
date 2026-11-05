@@ -1533,6 +1533,41 @@ describe("per-call model preflight", () => {
 		);
 	}
 
+	it("requires a live dispatch guard for goal-scoped models instead of widening global grants", async () => {
+		mockDiscovery({ ...AGENT, model: ["mock/agent-own"] });
+		const scoped = perCallSession({ "task.perCallModel": "on" });
+		scoped.getGoalModeState = () => ({
+			enabled: true,
+			mode: "active",
+			goal: {
+				id: "goal",
+				objective: "Ship",
+				status: "active",
+				tokensUsed: 0,
+				timeUsedSeconds: 0,
+				createdAt: 0,
+				updatedAt: 0,
+			},
+		});
+		await expect(
+			runStructuredSubagent(request({ session: scoped, perCallModel: "mock/target:high" })),
+		).rejects.toThrow("authorization is unavailable");
+		const guard = async () => {};
+		scoped.emitBeforeSubagentSpawn = async () => ({ assertDispatch: guard });
+		const dispatched: executorModule.ExecutorOptions[] = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			dispatched.push(options);
+			return result();
+		});
+		const settled = await runStructuredSubagent(
+			request({ session: scoped, perCallModel: "mock/target:high", retainArtifacts: true }),
+		);
+		expect(dispatched[0]?.assertDispatch).toBe(guard);
+		expect(dispatched[0]?.dispatchGoalId).toBe("goal");
+		expect(dispatched[0]?.perCallModelGrants?.requiresScopedAuthorization).toBe(true);
+		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+	});
+
 	// `off` refuses every kind and `eval` refuses task calls. The selector is invalid on purpose:
 	// the disabled gate is reported first, so a caller is never told to fix a selector it may not send.
 	it.each([

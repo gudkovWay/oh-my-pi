@@ -27,6 +27,7 @@ import type { Settings } from "../config/settings";
 import { isProviderEnabled, isUserSourceEnabled } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { CustomTool } from "../extensibility/custom-tools/types";
+import type { BeforeSubagentSpawnEventResult } from "../extensibility/extensions/types";
 import { sessionLocalProtocolOptions } from "../internal-urls/context";
 import { registerArtifactsDir } from "../internal-urls/registry-helpers";
 import { MCPManager } from "../mcp/manager";
@@ -205,6 +206,7 @@ export interface EffectiveSubagentPolicy {
 	agent: AgentDefinition;
 	effectiveAgent: AgentDefinition;
 	modelOverride?: string[];
+	assertDispatch?: BeforeSubagentSpawnEventResult["assertDispatch"];
 	/** Prepared read-only source fork for the bundled seance agent. */
 	preparedSession?: PreparedSeanceSession;
 	/** Explicit pre-expansion model role alias selected for this run. */
@@ -422,6 +424,10 @@ function preflightPerCallModel(
 		parentModelPattern,
 		matchPreferences: structuredClone(getModelMatchPreferences(settings.grantAuthority())),
 	};
+	if (request.session.getGoalModeState?.()?.enabled) {
+		grants.requiresScopedAuthorization = true;
+		return grants;
+	}
 	// A cold registry is checked again in the executor once models are loaded.
 	const available = modelRegistry?.getAvailable("all");
 	if (!modelRegistry || !available?.length) return grants;
@@ -663,9 +669,13 @@ async function applySpawnHook(
 	request: StructuredSubagentRequest,
 	policy: EffectiveSubagentPolicy,
 ): Promise<EffectiveSubagentPolicy> {
-	if (policy.preparedSession !== undefined) return policy;
 	const emit = request.session.emitBeforeSubagentSpawn;
-	if (!emit) return policy;
+	if (!emit) {
+		if (policy.perCallModelGrants?.requiresScopedAuthorization) {
+			throw new StructuredSubagentError("preflight", "Authenticated goal model authorization is unavailable.");
+		}
+		return policy;
+	}
 	const spawnKey =
 		request.identity?.id ??
 		request.identity?.label ??
@@ -684,10 +694,14 @@ async function applySpawnHook(
 	if (spawnResult?.block) {
 		throw new StructuredSubagentError("preflight", spawnResult.reason ?? "Subagent spawn blocked by extension.");
 	}
-	if (spawnResult?.model === undefined) return policy;
+	if (policy.perCallModelGrants?.requiresScopedAuthorization && !spawnResult?.assertDispatch) {
+		throw new StructuredSubagentError("preflight", "This model requires a live authenticated goal dispatch guard.");
+	}
+	const guarded = { ...policy, assertDispatch: spawnResult?.assertDispatch };
+	if (spawnResult?.model === undefined) return guarded;
 	const replacement = resolveConfiguredModelPatterns(spawnResult.model, request.session.settings);
-	if (replacement.length === 0) return policy;
-	return { ...policy, modelOverride: replacement, modelRoute: spawnResult.note };
+	if (replacement.length === 0) return guarded;
+	return { ...guarded, modelOverride: replacement, modelRoute: spawnResult.note };
 }
 
 /** Reserve a session-global agent id only after preflight has succeeded. */
@@ -785,6 +799,8 @@ function buildExecutorOptions(
 		modelRole: policy.modelRole,
 		modelRoute: policy.modelRoute,
 		serviceTierOverride: policy.serviceTierOverride,
+		assertDispatch: policy.assertDispatch,
+		dispatchGoalId: policy.assertDispatch ? session.getGoalModeState?.()?.goal.id : undefined,
 		compactionThresholdOverride: policy.compactionThresholdOverride,
 		oauthAccountPools: policy.oauthAccountPools,
 		parentActiveModelPattern: policy.parentActiveModelPattern,
