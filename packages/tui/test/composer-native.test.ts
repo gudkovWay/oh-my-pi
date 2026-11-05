@@ -53,6 +53,100 @@ afterEach(() => {
 });
 
 describe("native composer", () => {
+	it("bounds a long draft by the current pane height and updates after a vertical resize", () => {
+		const editor = composer({ running: false });
+		let rows = 30;
+		editor.viewportRowsProvider = () => rows;
+		const draft = "Long draft line\n".repeat(40);
+		editor.setText(draft);
+		const input = (root: NativeNode) => nodes(root).find(n => n.k === "editor")!;
+
+		const full = editor.describe(cx);
+		expect(full.p).toMatchObject({ max: { h: "10lines" } });
+		expect(input(full).p).toMatchObject({ text: draft, maxLines: 3 });
+		expect(editor.describe(cx)).toBe(full);
+
+		rows = 15;
+		const split = editor.describe(cx);
+		expect(split.p).toMatchObject({ max: { h: "6lines" } });
+		expect(input(split).p).toMatchObject({ text: draft, maxLines: 1 });
+		expect(byRole(split, "omp.composer.send")).toBeDefined();
+
+		rows = 11;
+		const short = editor.describe(cx);
+		expect(short.p).toMatchObject({ max: { h: "6lines" } });
+		expect(input(short).p).toMatchObject({ maxLines: 1 });
+		expect(byRole(short, "omp.composer.send")).toBeDefined();
+
+		rows = 2;
+		expect(editor.describe(cx).p).toMatchObject({ max: { h: "6lines" } });
+		expect(input(editor.describe(cx)).p).toMatchObject({ maxLines: 1 });
+		expect(editor.getText()).toBe(draft);
+	});
+
+	it("keeps image attachments accessible without a thumbnail band consuming the height budget", () => {
+		const editor = composer({ running: false });
+		editor.setDraft("See [Image #1, 1x1]", [{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" }]);
+		editor.pendingImageLinks[0] = "file:///draft.png";
+		const root = editor.describe(cx);
+		expect(byRole(byRole(root, "omp.composer.bar")!, "omp.composer.attachments")?.p).toMatchObject({
+			spans: [expect.objectContaining({ t: "Image #1", href: "file:///draft.png" })],
+		});
+		expect(editor.pendingImages).toHaveLength(1);
+	});
+
+	it("folds and restores the draft, attachments and caret without reopening on focus or status changes", async () => {
+		const editor = composer({ running: false });
+		editor.setText("Read this draft\nbefore sending");
+		editor.handleInput("\x1b[D");
+		editor.pendingImages.push({ type: "image", data: "aW1hZ2U=", mimeType: "image/png" });
+		editor.pendingImageLinks.push("file:///draft.png");
+		const cursor = editor.getCursor();
+		const h = await TspHarness.start(tui => {
+			tui.addChild(editor);
+			tui.setFocus(editor);
+		});
+		try {
+			const collapse = h.find(n => n.p?.role === "omp.composer.collapse")!;
+			expect(collapse).toBeDefined();
+			h.event({ ev: "action", sf: h.terminal.surface!, id: collapse.id, act: "composer.collapse" });
+			await h.render();
+			expect(h.find(n => n.k === "editor")).toBeUndefined();
+			expect(h.find(n => n.p?.role === "omp.composer.preview")?.p).toMatchObject({
+				text: "Read this draft before sending",
+			});
+
+			h.tui.setFocus(null);
+			h.tui.setFocus(editor);
+			editor.composerState = () => ({ running: true, rate: 12 });
+			await h.render();
+			expect(h.find(n => n.k === "editor")).toBeUndefined();
+			expect(h.find(n => n.p?.role === "omp.composer.stop")).toBeDefined();
+			const expand = h.find(n => n.p?.role === "omp.composer.expand")!;
+			h.event({ ev: "action", sf: h.terminal.surface!, id: expand.id, act: "composer.expand" });
+			await h.render();
+			expect(h.find(n => n.k === "editor")?.p).toMatchObject({
+				text: "Read this draft\nbefore sending",
+				cursor: 29,
+			});
+			expect(editor.getCursor()).toEqual(cursor);
+			expect(editor.pendingImages).toHaveLength(1);
+			expect(editor.pendingImageLinks).toEqual(["file:///draft.png"]);
+			expect(h.errors).toEqual([]);
+		} finally {
+			h.stop();
+		}
+	});
+
+	it("opens a manually folded composer when typing, without changing the existing draft", () => {
+		const editor = composer({ running: false });
+		editor.setText("draft");
+		editor.handleNativeEvent({ type: "action", key: "collapse", act: "composer.collapse", mods: [] });
+		expect(byRole(editor.describe(cx), "omp.composer.preview")).toBeDefined();
+		editor.handleInput("!");
+		expect(nodes(editor.describe(cx)).find(n => n.k === "editor")?.p).toMatchObject({ text: "draft!" });
+	});
+
 	it("tints the composer by shell mode and marks `!!` as not sent to the model", () => {
 		const bash = composer({ running: false, shell: { kind: "bash", excluded: true } }).describe(cx);
 		expect(bash.p).toMatchObject({ role: "omp.editor.bash" });
