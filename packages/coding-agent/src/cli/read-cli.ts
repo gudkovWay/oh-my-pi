@@ -7,9 +7,14 @@
  */
 import { getProjectDir } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
+import { loadCapability } from "../capability";
+import { MAIN_AGENT_RULE_NAME, type Rule, ruleCapability } from "../capability/rule";
+import { bucketRules } from "../capability/rule-buckets";
 import { ModelRegistry } from "../config/model-registry";
 import { Settings } from "../config/settings";
 import { initializeWithSettings } from "../discovery";
+import { TtsrManager } from "../export/ttsr";
+import { cfgTtsr } from "../export/ttsr-settings";
 import { releaseIdaDatabases } from "../ida";
 import { loadSkills } from "../extensibility/skills";
 import { closeDaemonClients } from "../launch/client";
@@ -74,6 +79,18 @@ export async function runReadCommand(cmd: ReadCommandArgs): Promise<void> {
 				},
 			});
 			session.skills = discovered.skills;
+		}
+		if (/rule:\/\//i.test(cmd.path)) {
+			const discovered = await loadCapability<Rule>(ruleCapability.id, { cwd });
+			const ttsr = cfgTtsr.get(settings);
+			const manager = new TtsrManager(ttsr);
+			const buckets = bucketRules(discovered.items, manager, {
+				builtinRules: ttsr.builtinRules,
+				disabledRules: ttsr.disabledRules,
+				agentName: MAIN_AGENT_RULE_NAME,
+			});
+			session.rules = discovered.items;
+			session.activeRules = [...buckets.rulebookRules, ...buckets.alwaysApplyRules, ...manager.getRules()];
 		}
 
 		// MCP servers start only when a read reaches an MCP resource — `mcp://`, a scheme with no
