@@ -2777,6 +2777,37 @@ export class SessionManager {
 		await this.#rewriteAtomically();
 	}
 
+	/** Bind asynchronous custom results to this journal even after /new or resume. */
+	captureCustomEntryWriter(): (customType: string, data?: unknown) => Promise<void> {
+		const sessionId = this.#sessionId;
+		const file = this.#sessionFile;
+		let preparationError: unknown;
+		const ready = this.ensureOnDisk().catch(error => {
+			preparationError = error;
+		});
+		return async (customType, data) => {
+			await ready;
+			if (preparationError !== undefined) throw preparationError;
+			if (this.#sessionId === sessionId && !this.#released) {
+				this.appendCustomEntry(customType, data);
+				await this.flush();
+				return;
+			}
+			if (!file) throw new Error("Originating in-memory journal is no longer active");
+			const origin = await SessionManager.open(file, undefined, this.#storage, {
+				throwIfMissing: true,
+				suppressBreadcrumb: true,
+			});
+			try {
+				if (origin.getSessionId() !== sessionId) throw new Error("Originating journal identity changed");
+				origin.appendCustomEntry(customType, data);
+				await origin.flush();
+			} finally {
+				await origin.close();
+			}
+		};
+	}
+
 	/** Persist this session's transcript as a newly identified OMP session. */
 	async persistCopy(
 		options?: { sessionDir?: string; suppressBreadcrumb?: boolean },

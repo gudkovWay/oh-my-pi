@@ -1,4 +1,5 @@
 import { clearSubmittedText } from "./helpers/draft";
+import { showReviewer } from "../modes/reviewer";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { journalJudgmentUsage, resolveJudge, sharedJudgmentCache } from "../judgment";
 import type { AgentSession } from "../session/agent-session";
@@ -394,6 +395,20 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				await runtime.ctx.handleJobsCommand({ full: verb === "full" });
 			}
 			clearSubmittedText(runtime);
+		},
+	},
+	{
+		name: "reviewer",
+		icon: "branch",
+		description: "Inspect the whole task, uncommitted or unpublished changes",
+		allowArgs: true,
+		handle: async (_command, runtime) => {
+			await runtime.output("/reviewer opens an interactive diff modal. Use it in OMP's interactive UI.");
+			return commandConsumed();
+		},
+		handleTui: async (command, runtime) => {
+			clearSubmittedText(runtime);
+			await showReviewer(runtime.ctx, command.args.trim() || undefined);
 		},
 	},
 	{

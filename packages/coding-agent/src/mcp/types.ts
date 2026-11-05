@@ -73,6 +73,8 @@ export type MCPRequestIdFormat = "string" | "number";
 interface MCPServerConfigBase {
 	/** Whether this server is enabled (default: true) */
 	enabled?: boolean;
+	/** User-config restriction by primary roots; linked worktrees share the same Git common-dir. */
+	repositoryRoots?: string[];
 	/** MCP request timeout in milliseconds (default: 30000, 0 to disable) */
 	timeout?: number;
 	/**

@@ -188,7 +188,10 @@ function parseRows(lines: readonly string[]): ParsedRows {
 }
 
 /** Parses a frozen git-format patch into independently addressable file occurrences. */
-export function parseReviewDiffSnapshot(rawDiff: string): ReviewDiffSnapshot {
+export function parseReviewDiffSnapshot(
+	rawDiff: string,
+	options: { includeAllFiles?: boolean } = {},
+): ReviewDiffSnapshot {
 	const files: ReviewDiffSnapshot["files"] = [];
 	const excluded: ExcludedReviewFile[] = [];
 	const occurrences = new Map<string, number>();
@@ -210,7 +213,9 @@ export function parseReviewDiffSnapshot(rawDiff: string): ReviewDiffSnapshot {
 		const path = newPath ?? oldPath;
 		if (path === undefined) continue;
 		const parsed = parseRows(lines);
-		const exclusionReason = EXCLUDED_PATTERNS.find(entry => entry.pattern.test(path))?.reason;
+		const exclusionReason = options.includeAllFiles
+			? undefined
+			: EXCLUDED_PATTERNS.find(entry => entry.pattern.test(path))?.reason;
 		if (exclusionReason !== undefined) {
 			excluded.push({
 				path,

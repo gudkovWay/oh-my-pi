@@ -33,6 +33,7 @@ import type {
 	AsyncJobRunResult,
 	AsyncJobType,
 } from "../../async/job-manager";
+import type { JobResultReceipt } from "../../async/job-results";
 import type { JobTextSource, JobWidgetInputs, JobWidgetRegistry } from "../../job-widgets/types";
 import type { RemoteObject } from "../rpc";
 import {
@@ -289,6 +290,10 @@ export class RemoteAsyncJobManager implements AsyncJobManagerApi {
 			return undefined;
 		}
 		return this.#row(wire);
+	}
+
+	readResult(id: string, ownerId: string | undefined): JobResultReceipt | undefined {
+		return this.#remote.callSync("readResult", id, ownerId);
 	}
 
 	getRunningJobs(filter?: AsyncJobFilter): AsyncJob[] {

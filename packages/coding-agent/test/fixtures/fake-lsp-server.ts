@@ -92,6 +92,37 @@ async function handleRequest(message: JsonRpcMessage): Promise<void> {
 			});
 			break;
 		}
+		case "textDocument/hover":
+		case "textDocument/definition":
+		case "textDocument/typeDefinition":
+		case "textDocument/implementation":
+		case "textDocument/references": {
+			const fixture = initializationOptions as { reviewer?: { source: string; target: string } } | null;
+			const params = message.params as {
+				textDocument: { uri: string };
+				position: { line: number; character: number };
+				context?: { includeDeclaration: boolean };
+			};
+			if (!fixture?.reviewer) {
+				respond(id, undefined, { code: -32601, message: "Reviewer fixture is not enabled" });
+			} else if (
+				params.textDocument.uri !== fixture.reviewer.source ||
+				params.position.line !== 1 ||
+				params.position.character !== 19 ||
+				(message.method === "textDocument/references" && params.context?.includeDeclaration !== true)
+			) {
+				respond(id, undefined, { code: -32602, message: "Wrong source occurrence or missing references context" });
+			} else if (message.method === "textDocument/hover") {
+				respond(id, { contents: { kind: "markdown", value: "(a: number, b: number) => number" } });
+			} else {
+				const range = { start: { line: 0, character: 16 }, end: { line: 0, character: 19 } };
+				respond(id, [
+					{ targetUri: fixture.reviewer.target, targetRange: range, targetSelectionRange: range },
+					{ uri: fixture.reviewer.target, range },
+				]);
+			}
+			break;
+		}
 		case "test/state": {
 			const didChangeSnapshot: Record<string, number[]> = {};
 			for (const uri in didChange) didChangeSnapshot[uri] = [...didChange[uri]];
@@ -139,6 +170,16 @@ function handleNotification(message: JsonRpcMessage): void {
 	notifications.push(message.method);
 
 	switch (message.method) {
+		case "initialized":
+			if ((initializationOptions as { reviewer?: unknown } | null)?.reviewer) {
+				send({
+					jsonrpc: "2.0",
+					method: "$/progress",
+					params: { token: "reviewer-index", value: { kind: "begin", title: "Fixture index" } },
+				});
+				send({ jsonrpc: "2.0", method: "$/progress", params: { token: "reviewer-index", value: { kind: "end" } } });
+			}
+			break;
 		case "textDocument/didOpen": {
 			const params = message.params as OpenDocumentParams;
 			const { uri, version, text } = params.textDocument;
