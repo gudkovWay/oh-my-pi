@@ -21,6 +21,7 @@ export interface ReviewDiffFile {
 	occurrence: number;
 	rawDiff: string;
 	rows: ReviewDiffRow[];
+	sources?: { old?: readonly string[]; new?: readonly string[] };
 	linesAdded: number;
 	linesRemoved: number;
 	isBinary: boolean;

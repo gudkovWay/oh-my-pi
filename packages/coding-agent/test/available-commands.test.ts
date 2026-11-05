@@ -53,6 +53,8 @@ describe("buildAvailableSlashCommands", () => {
 		expect(byName["server:prompt"].description).toBe("MCP prompt");
 		expect(byName.notes.description).toBe("Open notes");
 		expect(byName["skill:reviewer"].description).toBe("Review code");
+		expect(byName.reviewer.description).toBe("Inspect the whole task, uncommitted or unpublished changes");
+		expect(byName.reviewer.source).toBe("builtin");
 
 		expect(byName.model.source).toBe("builtin");
 		expect(byName["skill:reviewer"].source).toBe("skill");

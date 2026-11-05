@@ -43,7 +43,8 @@ import { appExternalEditorKey, matchesAppExternalEditor } from "../keybinding-ma
 import type { KeyName } from "../key-hint-format";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
 import { col, item, keyed, node, row as rowNode, span, text } from "../native/describe";
-import { leafKey, type NativeChild, type NativeNode, type NativeUiEvent } from "../native/node";
+import { reviewerSourceSpans } from "./reviewer-highlight";
+import { leafKey, type NativeChild, type NativeNode, type NativeScroll, type NativeUiEvent } from "../native/node";
 import { actionButton, hintsRow, itemIndex, type NativeHint, selectList } from "../native/overlay";
 
 function fit(text: string, width: number): string {
@@ -69,6 +70,12 @@ export interface AnnotationOverlayCallbacks {
 }
 
 export interface CodeReviewOverlayCallbacks extends AnnotationOverlayCallbacks {
+	/** Human review must not offer an LLM submission. */
+	humanOnly?: boolean;
+	/** The host owns the modal controls and footer actions. */
+	embedded?: boolean;
+	/** Start with the complete filtered comparison before individual files. */
+	wholeDiff?: boolean;
 	onComplete(result: CodeReviewOverlayResult | undefined): void;
 }
 
@@ -243,6 +250,9 @@ export class AnnotationOverlay implements Focusable {
 	/** Annotation lists before each create/edit/delete, restored by `u`. */
 	#undoStack: Array<{ annotations: CommittedAnnotation[]; textAnnotations: CommittedTextAnnotation[] }> = [];
 	#actions: readonly string[] = CODE_REVIEW_ACTIONS;
+	#embedded = false;
+	#wholeDiff = false;
+	#wholeScroll: NativeScroll = { by: "start", n: 0 };
 	#textSource: TextReviewSource | undefined;
 	#textLines: readonly string[] = [];
 	#viewportDriven = false;
@@ -304,8 +314,12 @@ export class AnnotationOverlay implements Focusable {
 			this.#files = filesOrSource;
 			this.#mode = modeOrCallbacks as string;
 			this.#callbacks = maybeCallbacks!;
+			if (maybeCallbacks?.humanOnly) this.#actions = TEXT_REVIEW_ACTIONS;
+			this.#embedded = maybeCallbacks?.embedded ?? false;
+			this.#wholeDiff = maybeCallbacks?.wholeDiff ?? false;
+			if (this.#wholeDiff) this.#fileIndex = -1;
 			// Start on Paste, not the LLM review: a stray Enter must not submit (it does nothing until a note exists).
-			this.#actionIndex = 1;
+			this.#actionIndex = maybeCallbacks?.humanOnly ? 0 : 1;
 		}
 		const symbols = {
 			cursor: theme.nav.cursor,
@@ -368,6 +382,14 @@ export class AnnotationOverlay implements Focusable {
 		this.#finished = true;
 	}
 
+	getSelectedSource(): { file: ReviewDiffFile; row: ReviewSourceRow } | undefined {
+		if (this.isEditing || this.#textSource) return undefined;
+		if (this.#viewportDriven) this.#syncCursorToViewport();
+		const file = this.#currentFile();
+		const row = this.#currentSourceRows()[this.#sourceIndex];
+		return file && row && !file.isBinary ? { file, row } : undefined;
+	}
+
 	/** Notes, the unfinished note, and any source edit, in the form {@link restoreDraft} replays. */
 	getDraft(): AnnotationOverlayDraft {
 		const editing =
@@ -424,6 +446,36 @@ export class AnnotationOverlay implements Focusable {
 
 	getAnnotations(): CodeReviewAnnotation[] {
 		return this.#annotations.map(entry => ({ ...entry.annotation }));
+	}
+
+	get isEditing(): boolean {
+		return this.#annotating || this.#annotationChooser !== undefined || this.#externalOperation;
+	}
+
+	/** Restore filtered notes by exact path, occurrence and source anchor. */
+	restoreAnnotations(annotations: readonly CodeReviewAnnotation[]): void {
+		const anchored: CommittedAnnotation[] = [];
+		for (const annotation of annotations) {
+			const fileIndex = this.#files.findIndex(
+				file => file.path === annotation.path && file.occurrence === annotation.occurrence,
+			);
+			if (fileIndex < 0) continue;
+			const sourceIndex =
+				annotation.scope === "file"
+					? -1
+					: this.#files
+							[fileIndex]!.rows.filter(isSourceRow)
+							.findIndex(
+								row =>
+									row.raw === annotation.rawLine &&
+									row.oldLine === annotation.oldLine &&
+									row.newLine === annotation.newLine,
+							);
+			if (annotation.scope !== "file" && sourceIndex < 0) continue;
+			anchored.push({ fileIndex, sourceIndex, annotation: { ...annotation } });
+		}
+		this.restoreDraft({ kind: "diff", annotations: anchored });
+		this.#undoStack = [];
 	}
 
 	getTextAnnotations(): TextReviewAnnotation[] {
@@ -570,7 +622,13 @@ export class AnnotationOverlay implements Focusable {
 	}
 
 	#cycleFocus(direction: number): void {
-		const regions: FocusRegion[] = this.#sidebarShown ? ["files", "diff", "actions"] : ["diff", "actions"];
+		const regions: FocusRegion[] = this.#embedded
+			? this.#sidebarShown
+				? ["files", "diff"]
+				: ["diff"]
+			: this.#sidebarShown
+				? ["files", "diff", "actions"]
+				: ["diff", "actions"];
 		const current = regions.indexOf(this.#focus);
 		const index = current < 0 ? regions.length - 1 : current;
 		this.#focus = regions[(index + direction + regions.length) % regions.length]!;
@@ -582,7 +640,7 @@ export class AnnotationOverlay implements Focusable {
 			return;
 		}
 		if (this.#keybindings.matches(data, "tui.select.up") || matchesKey(data, "k")) {
-			this.#selectFile(Math.max(0, this.#fileIndex - 1));
+			this.#selectFile(Math.max(this.#wholeDiff ? -1 : 0, this.#fileIndex - 1));
 			return;
 		}
 		if (this.#keybindings.matches(data, "tui.select.down") || matchesKey(data, "j")) {
@@ -604,7 +662,31 @@ export class AnnotationOverlay implements Focusable {
 			return;
 		}
 		if (matchesKey(data, "right") || matchesKey(data, "l") || this.#keybindings.matches(data, "tui.select.confirm")) {
-			this.#focus = "actions";
+			if (!this.#embedded) this.#focus = "actions";
+			return;
+		}
+		if (this.#fileIndex < 0 && this.#wholeDiff) {
+			const by =
+				this.#keybindings.matches(data, "tui.select.up") || matchesKey(data, "k")
+					? "line-up"
+					: this.#keybindings.matches(data, "tui.select.down") || matchesKey(data, "j")
+						? "line-down"
+						: this.#keybindings.matches(data, "tui.select.pageUp")
+							? "page-up"
+							: this.#keybindings.matches(data, "tui.select.pageDown")
+								? "page-down"
+								: data === "g" || matchesKey(data, "home")
+									? "start"
+									: data === "G" || matchesKey(data, "end")
+										? "end"
+										: undefined;
+			if (by) {
+				this.#wholeScroll = { by, n: this.#wholeScroll.n + 1 };
+				if (by === "start") this.#scrollView.scrollToTop();
+				else if (by === "end") this.#scrollView.scrollToBottom();
+				else if (by === "page-up" || by === "page-down") this.#scrollView.page(by === "page-up" ? -1 : 1);
+				else this.#scrollView.scroll(by === "line-up" ? -1 : 1);
+			}
 			return;
 		}
 		if (matchesKey(data, "shift+up")) {
@@ -686,7 +768,7 @@ export class AnnotationOverlay implements Focusable {
 	#actionDisabled(index: number): boolean {
 		if (this.#actions[index] === DISCARD_ANNOTATIONS_ACTION) return false;
 		const hasAnnotations = this.#textSource ? this.#textAnnotations.length > 0 : this.#annotations.length > 0;
-		return this.#textSource ? !hasAnnotations : index === 1 && !hasAnnotations;
+		return this.#actions[index] === PASTE_CODE_REVIEW_ACTION && !hasAnnotations;
 	}
 
 	#confirmAction(discardArmed = false): void {
@@ -711,7 +793,7 @@ export class AnnotationOverlay implements Focusable {
 			});
 		} else {
 			this.#finish({
-				action: this.#actionIndex === 0 ? "review" : "paste",
+				action: this.#actions[this.#actionIndex] === PASTE_CODE_REVIEW_ACTION ? "paste" : "review",
 				annotations: this.getAnnotations(),
 			});
 		}
@@ -719,14 +801,16 @@ export class AnnotationOverlay implements Focusable {
 
 	#selectFile(index: number): void {
 		if (this.#files.length === 0) return;
-		this.#fileIndex = Math.max(0, Math.min(this.#files.length - 1, index));
+		this.#fileIndex = Math.max(this.#wholeDiff ? -1 : 0, Math.min(this.#files.length - 1, index));
 		this.#resetSourceCursor();
 		this.#scrollView.scrollToTop();
 	}
 
 	#selectRelativeFile(delta: number): void {
 		if (this.#files.length === 0) return;
-		this.#selectFile((this.#fileIndex + delta + this.#files.length) % this.#files.length);
+		const first = this.#wholeDiff ? -1 : 0;
+		const count = this.#files.length - first;
+		this.#selectFile(first + ((this.#fileIndex - first + delta + count) % count));
 	}
 
 	#resetSourceCursor(): void {
@@ -1043,6 +1127,17 @@ export class AnnotationOverlay implements Focusable {
 
 	#renderBody(contentWidth: number): RenderedBody {
 		if (this.#textSource) return this.#renderTextBody(contentWidth);
+		if (this.#fileIndex < 0 && this.#wholeDiff) {
+			return {
+				lines: this.#files.flatMap(file => [
+					this.#theme.bold(sanitizeStatusText(displayFileLabel(file))),
+					...file.rawDiff
+						.split("\n")
+						.flatMap(line => wrapLiteralLine(replaceTabs(sanitizeText(line)), contentWidth)),
+				]),
+				renderedRowBySource: [],
+			};
+		}
 		const file = this.#currentFile();
 		if (!file)
 			return {
@@ -1202,6 +1297,7 @@ export class AnnotationOverlay implements Focusable {
 				Ellipsis.Unicode,
 			);
 		}
+		if (this.#fileIndex < 0 && this.#wholeDiff) return this.#theme.bold("Whole diff");
 		const file = this.#currentFile();
 		if (!file) return this.#theme.fg("dim", "No reviewable files");
 		const count = this.#annotationCount(this.#fileIndex);
@@ -1376,7 +1472,11 @@ export class AnnotationOverlay implements Focusable {
 	}
 
 	#sidebarStart(rows: number): number {
-		return Math.max(0, Math.min(this.#fileIndex - Math.floor(rows / 2), Math.max(0, this.#files.length - rows)));
+		const first = this.#wholeDiff ? -1 : 0;
+		return Math.max(
+			first,
+			Math.min(this.#fileIndex - Math.floor(rows / 2), Math.max(first, this.#files.length - rows)),
+		);
 	}
 
 	#renderSidebarBadge(file: ReviewDiffFile, count: number): string {
@@ -1394,6 +1494,10 @@ export class AnnotationOverlay implements Focusable {
 		const start = this.#sidebarStart(rows);
 		return Array.from({ length: rows }, (_, rowIndex) => {
 			const index = start + rowIndex;
+			if (index < 0 && this.#wholeDiff) {
+				const line = fit(`${this.#fileIndex < 0 ? "› " : "  "}Whole diff`, width);
+				return this.#fileIndex < 0 ? this.#theme.fg("accent", line) : this.#theme.fg("muted", line);
+			}
 			const file = this.#files[index];
 			if (!file) return "";
 			const selected = index === this.#fileIndex;
@@ -1484,7 +1588,9 @@ export class AnnotationOverlay implements Focusable {
 		if (!this.#sidebarShown && this.#focus === "files") this.#focus = "diff";
 		// Page size for PgUp/PgDn, matching the rendered body height.
 		const terminalHeight = this.#tui.terminal.rows;
-		this.#bodyHeight = Math.max(MIN_BODY_ROWS, terminalHeight - (this.#actions.length + 8));
+		this.#bodyHeight = this.#embedded
+			? Math.max(4, Math.floor(terminalHeight / 3) - (this.isEditing ? 4 : 0))
+			: Math.max(MIN_BODY_ROWS, terminalHeight - (this.#actions.length + 8));
 		this.#editor.setMaxHeight(Math.max(1, Math.min(MAX_ANNOTATION_EDITOR_ROWS, terminalHeight - 12)));
 		this.#editor.focused = this.focused && this.#annotating;
 		const body = this.#describeBodyItems();
@@ -1498,31 +1604,58 @@ export class AnnotationOverlay implements Focusable {
 			this.#annotating ? `annotating:${this.#annotationScope}:${this.#editingAnnotationIndex}` : "",
 			chooser ? `chooser:${chooser.selected}:${chooser.entries.join()}` : "",
 			this.#discardArmed ? "discard-armed" : "",
+			this.#wholeScroll.n,
 		].join("|");
 		if (this.#nativeRoot && sig === this.#nativeSig && body === this.#nativeRootBody) return this.#nativeRoot;
 
 		const editing = this.#annotating || chooser !== undefined;
 		const rowCount = this.#textSource ? this.#textLines.length : this.#currentSourceRows().length;
-		const lines = selectList("lines", body.items, {
+		const lineItems =
+			!this.#textSource && this.#fileIndex >= 0
+				? body.items.map(entry =>
+						entry.key === `l${this.#sourceIndex}` && entry.k === "row"
+							? {
+									...entry,
+									p: { ...entry.p, mark: "pick" as const },
+									reveal: { at: "nearest" as const, n: this.#sourceIndex },
+								}
+							: entry,
+					)
+				: this.#fileIndex < 0
+					? body.items.map((entry, index) => (index === 0 ? { ...entry, scroll: this.#wholeScroll } : entry))
+					: body.items;
+		const lines = selectList("lines", lineItems, {
 			selected: rowCount > 0 ? `l${this.#sourceIndex}` : null,
-			// Past 200 rows the terminal virtualizes the list itself (fixed one-line rows).
+			// Wrapped source rows have variable heights and must stay mounted.
 			max: { lines: this.#bodyHeight },
+			virtual: false,
 			empty: [span(this.#textSource ? "This text is empty" : "Nothing to review", "muted")],
 			role: this.#textSource ? "omp.review.text" : "omp.review.diff",
 			tone: this.#focus === "diff" && !editing ? "accent" : undefined,
 		});
-		const pane: NativeChild[] = [this.#describePaneHead()];
+		const pane: NativeChild[] = [
+			this.#fileIndex < 0 ? text("Whole diff", { role: "omp.review.head" }) : this.#describePaneHead(),
+		];
 		pane.push(lines);
 		const composer = this.#describeComposer();
 		if (composer) pane.push(composer);
-		const main = node("col", { role: "omp.review.pane", grow: 1, min: { w: 0 } }, pane, "pane");
+		const main = node("col", { role: "omp.review.pane", grow: 1, basis: 0, min: { w: 0 } }, pane, "pane");
 		const children: NativeChild[] = [];
 		if (this.#sidebarShown) {
-			children.push(keyed(rowNode([this.#describeRail(editing), main], { role: "omp.review.split" }), "split"));
+			children.push(
+				keyed(
+					rowNode([this.#describeRail(editing), main], {
+						role: "omp.review.split",
+						align: this.#embedded ? "start" : undefined,
+						gap: this.#embedded ? "md" : undefined,
+					}),
+					"split",
+				),
+			);
 		} else {
 			children.push(main);
 		}
-		children.push(this.#describeFooter(editing));
+		children.push(this.#embedded ? hintsRow(this.#footerHints()) : this.#describeFooter(editing));
 
 		this.#nativeSig = sig;
 		this.#nativeRootBody = body;
@@ -1541,15 +1674,22 @@ export class AnnotationOverlay implements Focusable {
 			}
 			// A draft or the note chooser is open: finish or leave it first.
 			if (this.#annotating || this.#annotationChooser) return;
+			if (event.act === "select-line" || event.act === "annotate-line") {
+				const index = itemIndex(leafKey(event.key), "l");
+				if (index < 0 || index >= this.#currentSourceRows().length) return;
+				this.#focus = "diff";
+				this.#sourceIndex = index;
+				this.#viewportDriven = false;
+				if (event.act === "annotate-line") this.#startAnnotation("line");
+				return;
+			}
 			const index =
 				event.act === "discard"
 					? this.#actions.indexOf(DISCARD_ANNOTATIONS_ACTION)
 					: event.act === "review" && !this.#textSource
-						? 0
+						? this.#actions.indexOf(CONTINUE_CODE_REVIEW_ACTION)
 						: event.act === "paste"
-							? this.#textSource
-								? 0
-								: 1
+							? this.#actions.indexOf(PASTE_CODE_REVIEW_ACTION)
 							: -1;
 			if (index < 0 || this.#actionDisabled(index)) return;
 			this.#actionIndex = index;
@@ -1572,8 +1712,9 @@ export class AnnotationOverlay implements Focusable {
 		if (chooser || this.#annotating) return;
 		switch (leaf) {
 			case "files": {
-				const index = itemIndex(event.item, "f");
-				if (index < 0 || index >= this.#files.length) return;
+				const whole = event.item === "all" && this.#wholeDiff;
+				const index = whole ? -1 : itemIndex(event.item, "f");
+				if ((!whole && index < 0) || index >= this.#files.length) return;
 				this.#focus = "files";
 				if (index !== this.#fileIndex) this.#selectFile(index);
 				if (activate) this.#focus = "diff";
@@ -1591,6 +1732,104 @@ export class AnnotationOverlay implements Focusable {
 				return;
 			}
 		}
+	}
+
+	#describeDiffItems(file: ReviewDiffFile, fileIndex: number, interactive: boolean): NativeNode[] {
+		const items: NativeNode[] = [];
+		const note = (key: string, body: string, scope?: string) =>
+			items.push(
+				item(key, {
+					label: [span(sanitizeStatusText(body))],
+					value: scope ? [span(scope, "muted")] : undefined,
+					icon: "pen",
+					disabled: true,
+					tone: "warning",
+					role: "omp.review.note",
+				}),
+			);
+		const notice = (key: string, label: string, icon: string) =>
+			items.push(item(key, { label: [span(label, "muted")], icon, disabled: true, tone: "muted" }));
+		const highlighted = reviewerSourceSpans(file);
+		for (const [index, entry] of this.#annotations.entries()) {
+			if (entry.fileIndex === fileIndex && entry.annotation.scope === "file") {
+				note(`n${index}`, entry.annotation.note, "File note");
+			}
+		}
+		if (file.isBinary) {
+			notice("binary", "Binary file: no lines to annotate, but a file note works", "binary");
+		} else if (file.rows.length === 0) {
+			notice("empty", "No hunks: this looks like a rename-only change", "forward");
+		}
+		let lineWidth = 1;
+		for (const diffRow of file.isBinary ? [] : file.rows) {
+			if (!isSourceRow(diffRow)) continue;
+			lineWidth = Math.max(lineWidth, String(diffRow.oldLine ?? "").length, String(diffRow.newLine ?? "").length);
+		}
+		// The old/new line gutter is the item's value (drawn first); rows without numbers keep its width.
+		const blankGutter = [span(" ".repeat(lineWidth * 2 + 1), "mono")];
+		let sourceIndex = 0;
+		for (const [rowIndex, diffRow] of file.isBinary ? [] : file.rows.entries()) {
+			if (!isSourceRow(diffRow)) {
+				if (diffRow.kind === "hunk") {
+					const match = /^(@@[^@]*@@)\s?(.*)$/.exec(sanitizeText(diffRow.raw));
+					const label = match
+						? [span(match[1]!, "mono"), span(match[2] ? `  ${replaceTabs(match[2])}` : "", "muted mono")]
+						: [span(sanitizeText(diffRow.raw), "mono")];
+					items.push(item(`r${rowIndex}`, { label, value: blankGutter, disabled: true, tone: "info" }));
+				} else {
+					items.push(
+						item(`r${rowIndex}`, {
+							label: [span("No newline at end of file", "muted")],
+							value: blankGutter,
+							disabled: true,
+							tone: "muted",
+						}),
+					);
+				}
+				continue;
+			}
+			const added = diffRow.kind === "added";
+			const removed = diffRow.kind === "removed";
+			const oldCell = String((added ? undefined : diffRow.oldLine) ?? "").padStart(lineWidth);
+			const newCell = String((removed ? undefined : diffRow.newLine) ?? "").padStart(lineWidth);
+			const color: DiffColor = added ? "toolDiffAdded" : removed ? "toolDiffRemoved" : "toolDiffContext";
+			items.push(
+				node(
+					"row",
+					{
+						role: "omp.review.source",
+						align: "start",
+						min: { w: 0 },
+						actions: interactive ? { click: "select-line", dblclick: "annotate-line" } : undefined,
+					},
+					[
+						text([span(added ? "+ " : removed ? "- " : "  ", `${color} mono`)], {
+							wrap: "none",
+							shrink: 0,
+						}),
+						text(highlighted.get(diffRow) ?? [span(replaceTabs(sanitizeText(diffRow.content)), "mono")], {
+							wrap: "char",
+							grow: 1,
+							min: { w: 0 },
+						}),
+						text([span(`${oldCell} ${newCell}`, "muted mono")], { wrap: "none", shrink: 0 }),
+					],
+					`l${sourceIndex}`,
+				),
+			);
+			// A line's notes sit under it, like review comments.
+			for (const [index, entry] of this.#annotations.entries()) {
+				if (
+					entry.fileIndex === fileIndex &&
+					entry.sourceIndex === sourceIndex &&
+					entry.annotation.scope === "line"
+				) {
+					note(`n${index}`, entry.annotation.note);
+				}
+			}
+			sourceIndex++;
+		}
+		return items;
 	}
 
 	/**
@@ -1613,8 +1852,6 @@ export class AnnotationOverlay implements Focusable {
 					role: "omp.review.note",
 				}),
 			);
-		const notice = (key: string, label: string, icon: string) =>
-			items.push(item(key, { label: [span(label, "muted")], icon, disabled: true, tone: "muted" }));
 		if (this.#textSource) {
 			for (const [index, entry] of this.#textAnnotations.entries()) {
 				if (entry.annotation.scope === "text") note(`n${index}`, entry.annotation.note, "Whole text");
@@ -1634,78 +1871,21 @@ export class AnnotationOverlay implements Focusable {
 					}
 				}
 			}
+		} else if (this.#fileIndex < 0) {
+			for (const [index, file] of this.#files.entries()) {
+				items.push(
+					node(
+						"section",
+						{ head: [span(displayFileLabel(file), "path")] },
+						this.#describeDiffItems(file, index, false),
+						`file${index}`,
+					),
+				);
+			}
 		} else {
 			const file = this.#currentFile();
 			if (file) {
-				for (const [index, entry] of this.#annotations.entries()) {
-					if (entry.fileIndex === this.#fileIndex && entry.annotation.scope === "file") {
-						note(`n${index}`, entry.annotation.note, "File note");
-					}
-				}
-				if (file.isBinary) {
-					notice("binary", "Binary file: no lines to annotate, but a file note works", "binary");
-				} else if (file.rows.length === 0) {
-					notice("empty", "No hunks: this looks like a rename-only change", "forward");
-				}
-				let lineWidth = 1;
-				for (const diffRow of file.isBinary ? [] : file.rows) {
-					if (!isSourceRow(diffRow)) continue;
-					lineWidth = Math.max(
-						lineWidth,
-						String(diffRow.oldLine ?? "").length,
-						String(diffRow.newLine ?? "").length,
-					);
-				}
-				// The old/new line gutter is the item's value (drawn first); rows without numbers keep its width.
-				const blankGutter = [span(" ".repeat(lineWidth * 2 + 1), "mono")];
-				let sourceIndex = 0;
-				for (const [rowIndex, diffRow] of file.isBinary ? [] : file.rows.entries()) {
-					if (!isSourceRow(diffRow)) {
-						if (diffRow.kind === "hunk") {
-							const match = /^(@@[^@]*@@)\s?(.*)$/.exec(sanitizeText(diffRow.raw));
-							const label = match
-								? [span(match[1]!, "mono"), span(match[2] ? `  ${replaceTabs(match[2])}` : "", "muted mono")]
-								: [span(sanitizeText(diffRow.raw), "mono")];
-							items.push(item(`r${rowIndex}`, { label, value: blankGutter, disabled: true, tone: "info" }));
-						} else {
-							items.push(
-								item(`r${rowIndex}`, {
-									label: [span("No newline at end of file", "muted")],
-									value: blankGutter,
-									disabled: true,
-									tone: "muted",
-								}),
-							);
-						}
-						continue;
-					}
-					const added = diffRow.kind === "added";
-					const removed = diffRow.kind === "removed";
-					const oldCell = String((added ? undefined : diffRow.oldLine) ?? "").padStart(lineWidth);
-					const newCell = String((removed ? undefined : diffRow.newLine) ?? "").padStart(lineWidth);
-					const color: DiffColor = added ? "toolDiffAdded" : removed ? "toolDiffRemoved" : "toolDiffContext";
-					items.push(
-						item(`l${sourceIndex}`, {
-							label: [
-								span(added ? "+ " : removed ? "- " : "  ", `${color} mono`),
-								span(replaceTabs(sanitizeText(diffRow.content)), "mono"),
-							],
-							value: [span(`${oldCell} ${newCell}`, "mono")],
-							tone: added ? "success" : removed ? "error" : undefined,
-						}),
-					);
-					// A line's notes sit under it, like review comments.
-					for (const [index, entry] of this.#annotations.entries()) {
-						if (
-							entry.fileIndex === this.#fileIndex &&
-							entry.sourceIndex === sourceIndex &&
-							entry.annotation.scope === "line"
-						) {
-							note(`n${index}`, entry.annotation.note);
-						}
-					}
-					sourceIndex++;
-				}
+				items.push(...this.#describeDiffItems(file, this.#fileIndex, true));
 			}
 		}
 		this.#nativeBody = { fileIndex: this.#fileIndex, rev: this.#annotationRev, items };
@@ -1731,29 +1911,32 @@ export class AnnotationOverlay implements Focusable {
 		);
 		const files = selectList(
 			"files",
-			this.#files.map((file, index) => {
-				const { dir, leaf } = splitPath(displayFileLabel(file));
-				const status = fileStatus(file);
-				const count = this.#annotationCount(index);
-				const value: TspSpan[] = [];
-				if (count) value.push(span(`✎ ${count}`, "warning"), span(" "));
-				if (file.isBinary) value.push(span("bin", "muted"));
-				else
-					value.push(
-						span(`+${file.linesAdded}`, "toolDiffAdded mono"),
-						span(" "),
-						span(`−${file.linesRemoved}`, "toolDiffRemoved mono"),
-					);
-				return item(`f${index}`, {
-					label: [span(sanitizeStatusText(leaf))],
-					detail: dir ? [span(sanitizeStatusText(dir))] : undefined,
-					value,
-					icon: file.isBinary ? "binary" : FILE_STATUS_ICON[status],
-					tone: FILE_STATUS_TONE[status],
-				});
-			}),
+			[
+				...(this.#wholeDiff ? [item("all", { label: "Whole diff", icon: "files" })] : []),
+				...this.#files.map((file, index) => {
+					const { dir, leaf } = splitPath(displayFileLabel(file));
+					const status = fileStatus(file);
+					const count = this.#annotationCount(index);
+					const value: TspSpan[] = [];
+					if (count) value.push(span(`✎ ${count}`, "warning"), span(" "));
+					if (file.isBinary) value.push(span("bin", "muted"));
+					else
+						value.push(
+							span(`+${file.linesAdded}`, "toolDiffAdded mono"),
+							span(" "),
+							span(`−${file.linesRemoved}`, "toolDiffRemoved mono"),
+						);
+					return item(`f${index}`, {
+						label: [span(sanitizeStatusText(leaf))],
+						detail: dir ? [span(sanitizeStatusText(dir))] : undefined,
+						value,
+						icon: file.isBinary ? "binary" : FILE_STATUS_ICON[status],
+						tone: FILE_STATUS_TONE[status],
+					});
+				}),
+			],
 			{
-				selected: this.#files.length > 0 ? `f${this.#fileIndex}` : null,
+				selected: this.#fileIndex < 0 ? "all" : this.#files.length > 0 ? `f${this.#fileIndex}` : null,
 				max: { lines: this.#bodyHeight },
 				empty: [span("No files", "muted")],
 				role: "omp.review.files",
@@ -1762,7 +1945,12 @@ export class AnnotationOverlay implements Focusable {
 		);
 		return node(
 			"col",
-			{ role: "omp.review.rail" },
+			{
+				role: "omp.review.rail",
+				...(this.#embedded
+					? { basis: 0.3, shrink: 0, min: { w: "20ch" as const }, max: { w: "32ch" as const } }
+					: {}),
+			},
 			[node("row", { role: "omp.review.total", gap: "sm", align: "center" }, total, "total"), files],
 			"rail",
 		);
@@ -1913,7 +2101,7 @@ export class AnnotationOverlay implements Focusable {
 				pick(this.#actions.indexOf(DISCARD_ANNOTATIONS_ACTION)),
 			),
 		];
-		if (this.#textSource) {
+		if (!this.#actions.includes(CONTINUE_CODE_REVIEW_ACTION)) {
 			buttons.push(
 				marked(actionButton("Paste into prompt", "paste", { tone: "accent", title: pasteTitle }), pick(0)),
 			);
