@@ -33,6 +33,7 @@ import type { ModelRegistry } from "../../config/model-registry";
 import { type Settings, withActiveSettings } from "../../config/settings";
 import type { LocalProtocolOptions } from "../../internal-urls/local-protocol";
 import type { MemoryRuntimeContext } from "../../memory-backend";
+import type { GoalRuntime, GoalTransition } from "../../goals/runtime";
 import { type Theme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { AsyncJobSnapshot, SendUserMessageOptions } from "../../session/agent-session";
 import { MAIN_AGENT_ID } from "../../registry/agent-registry";
@@ -545,6 +546,29 @@ export class ExtensionRunner {
 	#getPendingPlanReviewFn: NonNullable<ExtensionContextActions["getPendingPlanReview"]> = () => undefined;
 	#openPlanReviewFn: NonNullable<ExtensionContextActions["openPlanReview"]> = async () => false;
 	#sessionModes?: ExtensionContextActions["sessionModes"];
+	#goalRuntime?: GoalRuntime;
+
+	bindGoalRuntime(runtime: GoalRuntime): void {
+		this.#goalRuntime = runtime;
+	}
+
+	async emitGoalTransition(event: GoalTransition): Promise<void> {
+		if (!this.hasHandlers("goal_transition")) return;
+		const ctx = this.createContext();
+		for (const ext of this.extensions) {
+			for (const handler of ext.handlers.get("goal_transition") ?? []) {
+				const result = (await this.#runHandlerWithTimeout(
+					handler,
+					event,
+					ctx,
+					ext,
+					extensionHandlerTimeoutMs,
+					() => ({ block: true, reason: "Goal lifecycle handler unavailable" }),
+				)) as { block?: boolean; reason?: string } | undefined;
+				if (result?.block) throw new Error(result.reason ?? "Goal transition refused");
+			}
+		}
+	}
 	#getMemoryFn?: () => MemoryRuntimeContext | undefined;
 	#createAnnotations?: ExtensionAnnotationsFactory;
 	#commandDiagnostics: Array<{ type: string; message: string; path: string }> = [];
@@ -1622,6 +1646,7 @@ export class ExtensionRunner {
 			modelRegistry: this.modelRegistry,
 			isProjectTrusted: () => true,
 			agent,
+			goal: this.#goalRuntime,
 			get model() {
 				return getModel();
 			},
@@ -2443,6 +2468,7 @@ export class ExtensionRunner {
 		if (!this.hasHandlers("before_subagent_spawn")) return undefined;
 		const ctx = this.createContext();
 		let chosen: Pick<BeforeSubagentSpawnEventResult, "model" | "note"> | undefined;
+		const guards: NonNullable<BeforeSubagentSpawnEventResult["assertDispatch"]>[] = [];
 
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get("before_subagent_spawn");
@@ -2455,16 +2481,24 @@ export class ExtensionRunner {
 					ctx,
 					ext,
 					extensionHandlerTimeoutMs,
-					undefined,
+					() => ({ block: true, reason: "Subagent authorization handler unavailable" }),
 					signal,
 				);
 				if (!handlerResult) continue;
 				const result = handlerResult as BeforeSubagentSpawnEventResult;
 				if (result.block) return result;
+				if (result.assertDispatch) guards.push(result.assertDispatch);
 				if (result.model !== undefined) chosen = { model: result.model, note: result.note };
 			}
 		}
 
-		return chosen;
+		return guards.length
+			? {
+					...chosen,
+					assertDispatch: async (model, options) => {
+						for (const guard of guards) await guard(model, options);
+					},
+				}
+			: chosen;
 	}
 }

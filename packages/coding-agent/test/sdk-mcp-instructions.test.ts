@@ -123,6 +123,61 @@ describe("createAgentSession MCP server instructions (deferred UI)", () => {
 		mock.restore();
 	});
 
+	it("keeps one compact index through deferred discovery and explicit activation", async () => {
+		const marker = path.join(tempDir, "started");
+		await Bun.write(
+			path.join(tempDir, ".mcp.json"),
+			JSON.stringify({
+				mcpServers: {
+					instr: {
+						type: "stdio",
+						command: process.execPath,
+						args: [path.join(import.meta.dir, "fixtures/readiness-mcp.ts")],
+						env: { SRV_NAME: "instr", STARTUP_MARKER: marker },
+						onDemand: true,
+					},
+				},
+			}),
+		);
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			modelRegistry,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "mcp.startupTimeoutMs": 0, "tools.xdevDocs": "index", "eval.py": false }),
+			model: getBundledModel("openai", "gpt-4o-mini"),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableLsp: false,
+			skipPythonPreflight: true,
+			enableMCP: true,
+			systemPromptTemplate: "{{xdevDocs}}",
+		});
+		try {
+			const before = session.systemPrompt.join("\n");
+			expect(before.match(/## Tool index/g)).toHaveLength(1);
+			expect(before).toContain("instr (1 tools)");
+			expect(before).not.toContain("## MCP Tool Routes");
+			expect(before).not.toContain("mcp__instr_marker");
+			expect(fs.existsSync(marker)).toBe(false);
+			const activation = session.getToolByName("mcp__instr_connect");
+			expect(activation).toBeDefined();
+			await activation!.execute("activate", {});
+			expect(fs.readFileSync(marker, "utf8")).toBe("started");
+			expect(session.systemPrompt.join("\n").match(/## Tool index/g)).toHaveLength(1);
+			expect(session.systemPrompt.join("\n")).not.toContain("mcp__instr_marker");
+			const docs = await session.getToolByName("read")!.execute("schema", { path: "xd://mcp__instr_marker" });
+			expect(docs.content.some(part => part.type === "text" && part.text.includes("type Args"))).toBe(true);
+			const result = await session.getToolByName("mcp__instr_marker")!.execute("call", {});
+			expect(result.content.some(part => part.type === "text" && part.text === "MARKER_OK::instr")).toBe(true);
+		} finally {
+			await session.dispose();
+		}
+	}, 20_000);
+
 	it("omits an opted-out server's instructions and the empty heading, and keeps its tools", async () => {
 		await Bun.write(
 			path.join(tempDir, ".mcp.json"),

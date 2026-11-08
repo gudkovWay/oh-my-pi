@@ -1,0 +1,8 @@
+// This exact action never inherits blanket authorization or a cached KEEP grant.
+polkit.addRule(function(action, subject) {
+    if (action.id !== "org.omp.owner-approval.issue") return null;
+    if (subject.user !== "q" || !subject.local || !subject.active) {
+        return polkit.Result.NO;
+    }
+    return polkit.Result.AUTH_SELF;
+});

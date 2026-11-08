@@ -12,11 +12,17 @@ export interface ImageGenerationRequest {
 	aspectRatio?: string;
 	imageSize?: string;
 	count?: number;
+	quality?: "auto" | "low" | "medium" | "high";
+	background?: "auto" | "opaque" | "transparent";
+	outputFormat?: "png" | "webp" | "jpeg";
+	thinking?: "off" | "minimal" | "low" | "medium" | "high";
 }
 
 export interface GeneratedImage {
 	data: string;
 	mimeType: string;
+	id?: string;
+	revisedPrompt?: string;
 	/** Output dimensions (`WIDTHxHEIGHT`) the provider reports for this image, which may differ from the request. */
 	size?: string;
 	/** Rendering quality the provider reports for this image. */

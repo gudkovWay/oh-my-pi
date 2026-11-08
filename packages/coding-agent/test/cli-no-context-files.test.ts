@@ -7,6 +7,7 @@ import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { buildSessionOptions } from "@oh-my-pi/pi-coding-agent/main";
+import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -124,6 +125,21 @@ describe("--no-context-files", () => {
 		if (childPrompt === undefined) throw new Error("task tool did not create a subagent session");
 		return childPrompt;
 	}
+
+	it("does not discover or connect MCP servers under --no-tools", async () => {
+		const discover = spyOn(MCPManager.prototype, "discoverAndConnect").mockRejectedValue(
+			new Error("tool-less sessions must not start MCP discovery"),
+		);
+		let session: AgentSession | undefined;
+		try {
+			session = await createSession(["--no-tools", "--no-skills", "--no-rules", "--no-extensions"]);
+			expect(discover).not.toHaveBeenCalled();
+			expect(session.getActiveToolNames()).toEqual([]);
+		} finally {
+			await session?.dispose();
+			discover.mockRestore();
+		}
+	});
 
 	it("keeps every context file, including additional roots' and their imports, out of the session and its subagents", async () => {
 		const ambient = await createSession([]);

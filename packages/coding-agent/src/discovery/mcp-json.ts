@@ -25,6 +25,7 @@ interface MCPConfigFile {
 		string,
 		{
 			enabled?: boolean;
+			onDemand?: boolean;
 			timeout?: number;
 			requestIdFormat?: "string" | "number";
 			instructions?: boolean;
@@ -63,6 +64,10 @@ function transformMCPConfig(config: MCPConfigFile, source: SourceMeta): MCPServe
 	if (config.mcpServers) {
 		for (const [name, serverConfig] of Object.entries(config.mcpServers)) {
 			// Runtime type validation for user-controlled JSON values
+			if (serverConfig.onDemand !== undefined && typeof serverConfig.onDemand !== "boolean") {
+				logger.warn("MCP onDemand must be a boolean; server excluded", { name });
+				continue;
+			}
 			let enabled: boolean | undefined;
 			if (serverConfig.enabled !== undefined) {
 				if (typeof serverConfig.enabled === "boolean") {
@@ -104,6 +109,7 @@ function transformMCPConfig(config: MCPConfigFile, source: SourceMeta): MCPServe
 			const server: MCPServer = {
 				name,
 				enabled,
+				onDemand: serverConfig.onDemand,
 				timeout,
 				requestIdFormat,
 				instructions,

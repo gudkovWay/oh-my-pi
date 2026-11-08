@@ -3,7 +3,7 @@ import * as path from "node:path";
 import { logger } from "@oh-my-pi/pi-utils";
 import { MAIN_AGENT_RULE_NAME, SUB_AGENT_RULE_NAME } from "../capability/rule";
 import { validateAgentAccountPools } from "../config/account-pools";
-import type { Model } from "@oh-my-pi/pi-ai";
+import type { Model, SimpleStreamOptions } from "@oh-my-pi/pi-ai";
 import { assertModelSupportsEffortCeiling } from "@oh-my-pi/pi-tui/thinking";
 import type { ModelRegistry } from "../config/model-registry";
 import {
@@ -17,7 +17,7 @@ import type { Settings } from "../config/settings";
 import { MCPManager } from "../mcp/manager";
 import { initializeExtensions } from "../modes/runtime-init";
 import type { AsyncJobManagerApi } from "../async";
-import type { PreparedExtension } from "../extensibility/extensions/types";
+import type { BeforeSubagentSpawnEventResult, PreparedExtension } from "../extensibility/extensions/types";
 import type { PersistedSubagentReviverFactory } from "../registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { createAgentSession } from "../sdk";
@@ -108,6 +108,10 @@ export interface PersistedReviveSpec {
 	readonly authStorage: AuthStorage;
 	readonly modelRegistry: ModelRegistry;
 	readonly settings: Settings;
+	readonly reauthorizeDispatch?: (
+		goalId: string | undefined,
+		patterns: string[],
+	) => Promise<NonNullable<BeforeSubagentSpawnEventResult["assertDispatch"]>>;
 	readonly enableLsp: boolean;
 	readonly eventBus: EventBus | undefined;
 	readonly subagentEventBus: EventBus | undefined;
@@ -155,6 +159,7 @@ export function createPersistedSubagentReviverFactory(
 		// is gone (isolated/merged worktree, moved dir): leave it transcript-only
 		// (history://) rather than resurrect a wrong or broken session.
 		if (!peek?.init) return undefined;
+		const persistedInit = peek.init;
 		let restoredSeance: RestoredSeanceSession | undefined;
 		if (peek.seanceSource !== undefined) {
 			try {
@@ -213,6 +218,22 @@ export function createPersistedSubagentReviverFactory(
 				authStorage: ctx.authStorage,
 				modelRegistry: ctx.modelRegistry,
 				settings: ctx.settings,
+				reauthorizeDispatch: async (goalId, patterns) => {
+					const goal = ctx.session.getGoalModeState();
+					if (goalId !== undefined && (!goal?.enabled || goal.goal.id !== goalId)) {
+						throw new Error("Persisted child belongs to an inactive or different goal.");
+					}
+					const decision = await ctx.session.extensionRunner?.emitBeforeSubagentSpawn({
+						type: "before_subagent_spawn",
+						agent: persistedInit.agent ?? ref.displayName,
+						invocationKind: "task",
+						patterns,
+					});
+					if (decision?.block || !decision?.assertDispatch) {
+						throw new Error(decision?.reason ?? "Persisted child authority is unavailable.");
+					}
+					return decision.assertDispatch;
+				},
 				enableLsp: ctx.enableLsp,
 				eventBus: ctx.eventBus,
 				subagentEventBus: ctx.subagentEventBus,
@@ -258,6 +279,26 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 	const resolveParentSession = () =>
 		ref.parentId === spec.rootAgentId ? spec.root : registry.get(ref.parentId ?? "")?.session;
 	const parentSession = resolveParentSession();
+	const guardedEntry = entries.findLast(
+		entry => entry.type === "custom" && entry.customType === "subagent-dispatch-guard",
+	);
+	let dispatchGuard: BeforeSubagentSpawnEventResult["assertDispatch"];
+	if (guardedEntry?.type === "custom") {
+		try {
+			const saved = guardedEntry.data as { goalId?: string; patterns?: unknown };
+			if (
+				!Array.isArray(saved.patterns) ||
+				!saved.patterns.every(p => typeof p === "string") ||
+				!spec.reauthorizeDispatch
+			) {
+				throw new Error("Persisted child dispatch authority cannot be restored.");
+			}
+			dispatchGuard = await spec.reauthorizeDispatch(saved.goalId, saved.patterns);
+		} catch (error) {
+			await reopened.close();
+			throw error;
+		}
+	}
 	let perCallModel: Model | undefined;
 	let assertApprovedModel: ((model: Model) => void) | undefined;
 	if (init.perCallModel) {
@@ -335,7 +376,7 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 					);
 				}
 			};
-			assertApprovedModel(perCallModel);
+			if (!dispatchGuard) assertApprovedModel(perCallModel);
 			assertModelSupportsEffortCeiling(perCallModel, cfgTaskMaxEffort.get(spec.settings));
 		} catch (error) {
 			await reopened.close();
@@ -453,14 +494,18 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 			oauthAccountPools,
 			// A per-call model is held to the operator's current grants, not the transcript's,
 			// never switches models, and keeps the live task.maxEffort ceiling the spawn ran under.
-			...(assertApprovedModel
+			...(assertApprovedModel || dispatchGuard
 				? {
 						thinkingLevelCeiling: cfgTaskMaxEffort.get(spec.settings),
 						disableModelFallback: true,
 						disableServerSideFallback: true,
-						assertDispatchModel: (model: Model) => {
-							assertApprovedModel(model);
+						assertDispatchModel: (model: Model, options?: SimpleStreamOptions) => {
+							if (!dispatchGuard) assertApprovedModel?.(model);
 							assertModelSupportsEffortCeiling(model, cfgTaskMaxEffort.get(spec.settings));
+							return dispatchGuard?.(model, {
+								reasoning: options?.reasoning,
+								serviceTier: options?.serviceTier,
+							});
 						},
 					}
 				: {}),

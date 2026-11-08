@@ -7,6 +7,7 @@ const startupDelayMs = Number(Bun.env.DELAY_STARTUP ?? 0);
 const callDelayMs = Number(Bun.env.DELAY_CALL ?? 0);
 
 async function serve(): Promise<void> {
+	if (Bun.env.STARTUP_MARKER) await Bun.write(Bun.env.STARTUP_MARKER, "started");
 	if (startupDelayMs > 0) await Bun.sleep(startupDelayMs);
 	const lines = readline.createInterface({ input: process.stdin });
 	for await (const line of lines) {

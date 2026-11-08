@@ -44,6 +44,7 @@ function convertToLegacyConfig(server: MCPServer): MCPServerConfig {
 	const transport = server.transport ?? (server.command ? "stdio" : server.url ? "http" : "stdio");
 	const shared = {
 		enabled: server.enabled,
+		onDemand: server.onDemand,
 		timeout: server.timeout,
 		requestIdFormat: server.requestIdFormat,
 		instructions: server.instructions,
@@ -397,6 +398,9 @@ export function filterExaMCPServers(
  */
 export function validateServerConfig(name: string, config: MCPServerConfig): string[] {
 	const errors: string[] = [];
+	if (config.onDemand !== undefined && typeof config.onDemand !== "boolean") {
+		errors.push(`Server "${name}": onDemand must be a boolean`);
+	}
 
 	const serverType = config.type ?? "stdio";
 

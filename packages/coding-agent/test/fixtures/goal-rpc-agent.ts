@@ -46,7 +46,13 @@ const { session } = await createAgentSession({
 	// Extension commands that change the session (/goaltest-new-session), navigate within it (/goaltest-navigate-here),
 	// or end the "slow" script's stalled turn (/goaltest-release).
 	extensions: [
-		pi => {
+		async pi => {
+			if (Bun.env.GOAL_RPC_NIGHT === "1") {
+				// This fixture intentionally exercises optional extension loading in the RPC host.
+				const modulePath = path.resolve(import.meta.dir, "../../../../scripts/owner-approval/night-runtime.js");
+				const { registerNightRuntime } = await import(modulePath);
+				registerNightRuntime(pi, { active: () => undefined, scopeParameters: {}, scopeHint: "" });
+			}
 			pi.registerCommand("goaltest-new-session", {
 				description: "start a new session from an extension; any argument text is then sent as a prompt",
 				handler: async (args, ctx) => {

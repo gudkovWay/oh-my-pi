@@ -605,6 +605,134 @@ describe("imageGenTool catalog routing", () => {
 		]);
 	});
 
+	it("preserves image controls and edit references through the catalog-selected Codex carrier", async () => {
+		const image = catalogModel("openai-codex", "gpt-image-2", "openai-codex-responses");
+		const carrier = catalogModel("openai-codex", "gpt-5.6-sol", "openai-codex-responses", "chat");
+		const requests: Record<string, unknown>[] = [];
+		const ctx = createContext({
+			models: [image, carrier],
+			settings: Settings.isolated({ modelRoles: { image: "openai-codex/gpt-image-2" } }),
+			fetch: async (_input, init) => {
+				requests.push(JSON.parse(String(init?.body)));
+				return new Response(
+					`data: ${JSON.stringify({
+						type: "response.completed",
+						response: {
+							output: [
+								{
+									type: "image_generation_call",
+									id: "img-edit",
+									result: PNG_DATA,
+									revised_prompt: "edited cube",
+								},
+							],
+							tools: [{ type: "image_generation", model: "gpt-image-2-codex" }],
+						},
+					})}\n\n`,
+					{ headers: { "content-type": "text/event-stream" } },
+				);
+			},
+		});
+		const result = await imageGenTool.execute(
+			"controls",
+			{
+				subject: "edit cube",
+				model: "openai-codex/gpt-image-2",
+				input: [{ data: PNG_DATA, mime_type: "image/png" }],
+				quality: "high",
+				background: "transparent",
+				output_format: "png",
+				thinking: "low",
+			},
+			undefined,
+			ctx,
+		);
+		collectPaths(result);
+		expect(requests).toHaveLength(1);
+		expect(requests[0]?.model).toBe("gpt-5.6-sol");
+		expect(requests[0]?.tools).toEqual([
+			{
+				type: "image_generation",
+				action: "edit",
+				output_format: "png",
+				quality: "high",
+				background: "transparent",
+			},
+		]);
+		expect(requests[0]?.reasoning).toMatchObject({ effort: "low" });
+		expect(requests[0]).toMatchObject({
+			input: [
+				{
+					content: [
+						{ type: "input_text" },
+						{ type: "input_image", image_url: `data:image/png;base64,${PNG_DATA}` },
+					],
+				},
+			],
+		});
+		expect(result.details?.images[0]).toMatchObject({ id: "img-edit", revisedPrompt: "edited cube" });
+		expect(result.details?.model).toBe("gpt-image-2-codex");
+		expect(result.details?.carrierModel).toBe("gpt-5.6-sol");
+		expect(result.details?.selectedModel).toBe("gpt-image-2");
+	});
+
+	it("does not switch providers or retry an explicit image route after model_not_found", async () => {
+		const image = catalogModel("openai-codex", "gpt-image-2", "openai-codex-responses");
+		const carrier = catalogModel("openai-codex", "gpt-5.6-sol", "openai-codex-responses", "chat");
+		const other = catalogModel("openai", "gpt-image-2", "openai-images");
+		const urls: string[] = [];
+		const ctx = createContext({
+			models: [image, carrier, other],
+			settings: Settings.isolated({ modelRoles: { image: "openai/gpt-image-2" } }),
+			fetch: async input => {
+				urls.push(String(input));
+				return new Response('{"error":{"code":"model_not_found","message":"unavailable carrier"}}', {
+					status: 400,
+				});
+			},
+		});
+		await expect(
+			imageGenTool.execute(
+				"unavailable",
+				{
+					subject: "cube",
+					model: "openai-codex/gpt-image-2",
+				},
+				undefined,
+				ctx,
+			),
+		).rejects.toThrow("Image generation exhausted");
+		expect(urls).toEqual(["https://openai-codex.example/v1/codex/responses"]);
+	});
+
+	it("does not contact the image provider after cancellation", async () => {
+		let calls = 0;
+		const image = catalogModel("openai-codex", "gpt-image-2", "openai-codex-responses");
+		const ctx = createContext({
+			models: [image],
+			settings: Settings.isolated(),
+			fetch: async () => {
+				calls++;
+				return imageResponse();
+			},
+		});
+		const controller = new AbortController();
+		controller.abort();
+		await expect(
+			imageGenTool.execute(
+				"cancelled",
+				{
+					subject: "cube",
+					model: "openai-codex/gpt-image-2",
+				},
+				undefined,
+				ctx,
+				controller.signal,
+			),
+		).rejects.toThrow();
+		expect(calls).toBe(0);
+	});
+
 	it.skipIf(process.platform === "win32")(
 		"rejects a FIFO image input before reading or contacting the provider",
 		async () => {
