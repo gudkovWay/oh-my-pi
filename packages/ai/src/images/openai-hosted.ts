@@ -30,6 +30,8 @@ const IMAGE_SYSTEM_INSTRUCTION =
 interface HostedOutput {
 	type: "image_generation_call" | "message";
 	result?: string;
+	id?: string;
+	revised_prompt?: string;
 	size?: string;
 	quality?: string;
 	content?: Array<{ type?: string; text?: string; refusal?: string }>;
@@ -100,6 +102,8 @@ function collectResponse(response: HostedResponse): ImageGenerationResult {
 			images.push({
 				data: output.result,
 				mimeType: sniffBase64ImageMimeType(output.result) ?? "image/webp",
+				...(output.id ? { id: output.id } : {}),
+				...(output.revised_prompt ? { revisedPrompt: output.revised_prompt } : {}),
 				...(output.size ? { size: output.size } : {}),
 				...(output.quality ? { quality: output.quality } : {}),
 			});
@@ -185,7 +189,9 @@ export async function generateHostedImage(
 	const tool = {
 		type: "image_generation",
 		action: content.length > 1 ? "edit" : "generate",
-		output_format: "webp",
+		output_format: request.outputFormat ?? "webp",
+		...(request.quality ? { quality: request.quality } : {}),
+		...(request.background ? { background: request.background } : {}),
 		...(size ? { size } : {}),
 		// A chat model generating on its own lets the host pick the image model.
 		...(model.api === "openai-responses" && modelKind(model) === "image"
@@ -199,6 +205,7 @@ export async function generateHostedImage(
 		tool_choice: { type: "image_generation" },
 		store: false,
 		...(stream ? { instructions: IMAGE_SYSTEM_INSTRUCTION, stream: true } : {}),
+		...(request.thinking && request.thinking !== "off" ? { reasoning: { effort: request.thinking } } : {}),
 	};
 	const fetchImpl = options.fetch ?? fetch;
 	return withAuth(
