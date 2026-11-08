@@ -10,6 +10,7 @@ import { isRecord, ptree, readLines, removeWithRetries } from "@oh-my-pi/pi-util
 const device = "mcp__stub_regression_announce";
 const deviceUri = `xd://${device}`;
 const cli = path.join(import.meta.dir, "../src/cli.ts");
+const cliCommand = Bun.env.OMP_TEST_CLI_BINARY ? [path.resolve(Bun.env.OMP_TEST_CLI_BINARY)] : [process.execPath, cli];
 const peer = path.join(import.meta.dir, "fixtures/rpc-mcp-server.ts");
 const fakeModel = path.join(import.meta.dir, "rpc-wire/fake-openai-server.ts");
 
@@ -86,21 +87,26 @@ describe("CLI RPC MCP discovery", () => {
 				// The denied launch runs first: the restored launch then proves the same
 				// command does spawn once the denylist is lifted, that nothing from the
 				// denied run sticks across restart, and that the mount survives switches.
-				for (const phase of ["disabled", "restored"] as const) {
+				for (const phase of ["disabled", "restored", "on-demand"] as const) {
 					const audit = path.join(root, `${phase}.jsonl`);
 					await Bun.write(audit, "");
 					await Bun.write(
 						path.join(agentDir, "mcp.json"),
 						JSON.stringify({
-							mcpServers: { stub: { command: process.execPath, args: [peer, audit] } },
+							mcpServers: {
+								stub: { command: process.execPath, args: [peer, audit], onDemand: phase === "on-demand" },
+							},
 							// Deny must win even when the user also explicitly force-enables it.
 							...(phase === "disabled" ? { disabledServers: ["stub"], enabledServers: ["stub"] } : {}),
 						}),
 					);
+					await Bun.write(
+						path.join(agentDir, "config.yml"),
+						phase === "on-demand" ? "tools:\n  xdevDocs: index\n" : "{}\n",
+					);
 					using child = ptree.spawn(
 						[
-							process.execPath,
-							cli,
+							...cliCommand,
 							"--mode",
 							mode,
 							"--model",
@@ -132,7 +138,24 @@ describe("CLI RPC MCP discovery", () => {
 						const state = await client.getState();
 						expect(state.dumpTools?.map(tool => tool.name)).toEqual(expect.arrayContaining(["read", "write"]));
 						expect(state.dumpTools?.some(tool => tool.name === device)).toBe(false);
-						const listing = toolResult(await client.promptAndWait("read_uri xd://"), "read", { path: "xd://" });
+						let listing = toolResult(await client.promptAndWait("read_uri xd://"), "read", { path: "xd://" });
+						if (phase === "on-demand") {
+							expect(listing).toContain("xd://mcp__stub_connect");
+							expect(listing).not.toContain(device);
+							expect(await auditEntries(audit)).toEqual([]);
+							const before = (await client.getState()).systemPrompt?.join("\n") ?? "";
+							expect(before.match(/## Tool index/g)).toHaveLength(1);
+							expect(before).not.toContain("## MCP Tool Routes");
+							expect(before).not.toContain(device);
+							const activated = await client.promptAndWait("write_uri xd://mcp__stub_connect {}");
+							expect(
+								toolResult(activated, "write", { path: "xd://mcp__stub_connect", content: "{}" }),
+							).toContain("Connected stub");
+							listing = toolResult(await client.promptAndWait("read_uri xd://"), "read", { path: "xd://" });
+							const after = (await client.getState()).systemPrompt?.join("\n") ?? "";
+							expect(after.match(/## Tool index/g)).toHaveLength(1);
+							expect(after).not.toContain(device);
+						}
 						if (phase === "disabled") {
 							expect(listing).not.toContain(device);
 							const events = await client.promptAndWait(`write_uri ${deviceUri} {}`);

@@ -73,7 +73,7 @@ export const XDEV_KEEP_TOP_LEVEL: Record<string, true> = {
 export const XDEV_TRANSPORT_TOOLS: Record<string, true> = { read: true, write: true };
 
 /** Controls which mounted-device docs are inlined into the system prompt. */
-export type XdevDocsMode = "inline" | "builtins" | "catalog";
+export type XdevDocsMode = "inline" | "builtins" | "catalog" | "index";
 
 /**
  * Whether an enabled tool is presented under `xd://` (rather than top-level)
@@ -338,6 +338,23 @@ export function planXdevPromptDocs(
 	mode: XdevDocsMode = "inline",
 	inlinePatterns: readonly string[] = [],
 ): XdevPromptDocs {
+	if (mode === "index") {
+		const devices: string[] = [];
+		const servers = new Map<string, number>();
+		for (const tool of listXdevTools(state)) {
+			const server = "mcpServerName" in tool ? tool.mcpServerName : undefined;
+			if (typeof server === "string") servers.set(server, (servers.get(server) ?? 0) + 1);
+			else devices.push(`\`${tool.name}\``);
+		}
+		const rows = ["## Tool index"];
+		if (devices.length > 0) rows.push(`Devices: ${devices.join(", ")}.`);
+		if (servers.size > 0)
+			rows.push(`MCP servers: ${[...servers].map(([name, count]) => `${name} (${count} tools)`).join(", ")}.`);
+		rows.push(
+			"Read xd:// for exact tool paths; read xd://<tool> for docs and JSON schema before first use. Write JSON arguments to that path to execute.",
+		);
+		return { sections: [rows.join("\n")], catalog: new Map() };
+	}
 	const sections: string[] = [];
 	const catalog = new Map<string, string>();
 	const inlineGlobs = compileInlineGlobs(inlinePatterns);
@@ -392,6 +409,7 @@ export function xdevDocsFor(
 	mode: XdevDocsMode,
 	inlinePatterns: readonly string[] = [],
 ): string {
+	if (mode === "index") return "";
 	const sections: string[] = [];
 	const inlineGlobs = compileInlineGlobs(inlinePatterns);
 	let used = 0;

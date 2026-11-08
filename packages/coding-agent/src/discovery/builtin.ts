@@ -134,6 +134,10 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 		const expanded = expandEnvVarsDeep(data.mcpServers);
 		for (const [serverName, config] of Object.entries(expanded)) {
 			const serverConfig = config as Record<string, unknown>;
+			if (serverConfig.onDemand !== undefined && typeof serverConfig.onDemand !== "boolean") {
+				warnings.push(`MCP server "${serverName}": onDemand must be a boolean; server excluded`);
+				continue;
+			}
 
 			// Validate enabled: coerce string "true"/"false", warn on other types
 			let enabled: boolean | undefined;
@@ -196,6 +200,7 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 			result.push({
 				name: serverName,
 				enabled,
+				onDemand: serverConfig.onDemand as boolean | undefined,
 				timeout,
 				requestIdFormat,
 				instructions,

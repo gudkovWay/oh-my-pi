@@ -11,6 +11,7 @@ import { logger, untilAborted } from "@oh-my-pi/pi-utils";
 import type { EffectiveExtensionRoots, SourceMeta } from "../capability/types";
 import { resolveConfigValue } from "../config/resolve-config-value";
 import type { CustomTool } from "../extensibility/custom-tools/types";
+import { throwIfAborted } from "../tools/tool-errors";
 import type { AuthStorage } from "../session/auth-storage";
 import {
 	MCPConnectionTimeoutError,
@@ -44,7 +45,7 @@ import type { McpConnectionStatusEvent } from "./startup-events";
 import { resolveMCPStartupTimeoutMs } from "./timeout";
 
 import type { MCPToolDetails } from "@oh-my-pi/pi-tui/tools/mcp";
-import { DeferredMCPTool, MCPTool } from "./tool-bridge";
+import { createMCPToolName, DeferredMCPTool, MCPTool } from "./tool-bridge";
 import type { MCPToolCache } from "./tool-cache";
 import { setGeneratedHeader } from "./transports/header-policy";
 import type {
@@ -877,8 +878,6 @@ export class MCPManager implements MCPManagerApi {
 				continue;
 			}
 
-			statusServerNames.push(name);
-
 			// Validate config
 			const validationErrors = validateServerConfig(name, config);
 			if (validationErrors.length > 0) {
@@ -886,6 +885,7 @@ export class MCPManager implements MCPManagerApi {
 				errors.set(name, message);
 				validationFailures.push({ name, message });
 				reportedErrors.add(name);
+				statusServerNames.push(name);
 				continue;
 			}
 
@@ -894,6 +894,12 @@ export class MCPManager implements MCPManagerApi {
 			// retry schedule still trying to bring back the old one.
 			this.#forgetLostServer(name);
 			this.#serverConfigs.set(name, config);
+			if (config.onDemand) {
+				this.#startupServers.delete(name);
+				this.#replaceServerTools(name, [this.#onDemandTool(name, config, sources, onStatus)]);
+				continue;
+			}
+			statusServerNames.push(name);
 			const connectionEpoch = this.#epoch;
 			const connectSignal = this.#connectAbort.signal;
 
@@ -1101,6 +1107,57 @@ export class MCPManager implements MCPManagerApi {
 			errors,
 			connectedServers: Array.from(connectedServers),
 			exaApiKeys: [], // Will be populated by discoverAndConnect
+		};
+	}
+
+	#onDemandTool(
+		name: string,
+		config: MCPServerConfig,
+		sources: Record<string, SourceMeta>,
+		onStatus?: (event: McpConnectionStatusEvent) => void,
+	): CustomTool<TSchema, MCPToolDetails> {
+		const epoch = this.#epoch;
+		let activation: Promise<void> | undefined;
+		return {
+			name: createMCPToolName(name, "connect"),
+			label: `${name}/connect`,
+			description: `Connect the ${name} MCP for the current task and discover its tools. Does not call a server tool.`,
+			parameters: { type: "object", properties: {}, additionalProperties: false } as TSchema,
+			approval: "exec",
+			mcpServerName: name,
+			mcpToolName: "connect",
+			execute: async (_id, _args, _onUpdate, _ctx, signal) => {
+				throwIfAborted(signal);
+				if (
+					epoch !== this.#epoch ||
+					!this.#serverConfigs.has(name) ||
+					(!activation && this.#serverConfigs.get(name) !== config)
+				) {
+					throw new Error(`MCP server "${name}" is no longer available`);
+				}
+				activation ??= (async () => {
+					const result = await this.connectServers(
+						{ [name]: { ...config, onDemand: false } },
+						sources,
+						onStatus,
+						0,
+					);
+					await this.#startupUpdates.get(name);
+					const error = result.errors.get(name);
+					if (error) throw new Error(error);
+					if (!this.#connections.has(name)) throw new Error(`MCP server "${name}" is no longer available`);
+				})();
+				await untilAborted(signal, () => activation!);
+				return {
+					content: [
+						{
+							type: "text",
+							text: `Connected ${name}. Read xd:// for its tool paths, then read the selected path for its schema before calling it.`,
+						},
+					],
+					details: { serverName: name, mcpToolName: "connect" },
+				};
+			},
 		};
 	}
 
@@ -1400,7 +1457,12 @@ export class MCPManager implements MCPManagerApi {
 	 */
 	getAllServerNames(): string[] {
 		return Array.from(
-			new Set([...this.#sources.keys(), ...this.#connections.keys(), ...this.#pendingConnections.keys()]),
+			new Set([
+				...this.#serverConfigs.keys(),
+				...this.#sources.keys(),
+				...this.#connections.keys(),
+				...this.#pendingConnections.keys(),
+			]),
 		);
 	}
 

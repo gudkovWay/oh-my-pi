@@ -408,7 +408,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			perCallModelAdvertisement: perCallModel
 				? getPerCallModelAdvertisement(session.settings, session.getActiveModel?.(), session.modelRegistry)
 				: undefined,
-			toolNames: session.getEvalBridgeToolNames?.(),
+			toolNames: session.getEvalBridgeToolNames?.().filter(name => !session.xdev?.mountedNames.has(name)),
 			maxTimeout: cfgToolsMaxTimeout.get(session.settings),
 		};
 	}

@@ -63,6 +63,7 @@ import type {
 	UsageProvider,
 } from "@oh-my-pi/pi-ai";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@oh-my-pi/pi-ai/oauth/types";
+import type { GoalRuntime, GoalTransition } from "../../goals/runtime";
 import type {
 	AutocompleteItem,
 	AutocompleteProvider,
@@ -808,6 +809,11 @@ export interface ExtensionContext {
 	 * only: `undefined` in print, JSON, RPC, and ACP modes and in subagents.
 	 */
 	sessionModes?: ExtensionSessionModes;
+	/** Native lifecycle shared by TUI, RPC, tools and authenticated goal extensions. */
+	goal?: Pick<
+		GoalRuntime,
+		"getState" | "createGoal" | "pauseGoal" | "resumeGoal" | "dropGoal" | "completeGoalFromTool"
+	>;
 	/** Identity of the agent this session runs: the top-level session or a subagent. */
 	agent: ExtensionAgentIdentity;
 	/**
@@ -1644,6 +1650,7 @@ export type ExtensionEvent =
 	| AfterProviderResponseEvent
 	| BeforeAgentStartEvent
 	| BeforeSubagentSpawnEvent
+	| GoalTransition
 	| AgentStartEvent
 	| AgentEndEvent
 	| SessionStopEvent
@@ -1739,6 +1746,8 @@ export interface BeforeAgentStartEventResult {
 export interface BeforeSubagentSpawnEventResult {
 	/** Replacement model patterns in attempt order (selectors or role aliases). Role identity is preserved. */
 	model?: string | string[];
+	/** Checked on every child request after model, effort and service tier resolution. */
+	assertDispatch?: (model: Model, options?: SimpleStreamOptions) => void | Promise<void>;
 	/** Refuse the spawn. */
 	block?: boolean;
 	/** Refusal reason surfaced to the caller. */
@@ -1852,6 +1861,7 @@ export interface ExtensionAPI {
 		event: "before_subagent_spawn",
 		handler: ExtensionHandler<BeforeSubagentSpawnEvent, BeforeSubagentSpawnEventResult>,
 	): void;
+	on(event: "goal_transition", handler: ExtensionHandler<GoalTransition, { block?: boolean; reason?: string }>): void;
 	on(event: "agent_start", handler: ExtensionHandler<AgentStartEvent>): void;
 	on(event: "agent_end", handler: ExtensionHandler<AgentEndEvent>): void;
 	on(event: "session_stop", handler: ExtensionHandler<SessionStopEvent, SessionStopEventResult>): void;

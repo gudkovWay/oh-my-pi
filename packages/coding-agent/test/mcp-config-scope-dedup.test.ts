@@ -175,12 +175,12 @@ describe("MCP scope filtering precedes connection-equivalence deduplication", ()
 		await git(projectDir, "worktree", "add", "-qb", "DEV-capitalism-slave-mcp-fixture", linked);
 		await fs.mkdir(path.join(linked, "subdir"));
 		await writeMcpJson(userAgentDir, {
-			linear: { type: "http", url: "https://linear.example/mcp", repositoryRoots: [projectDir] },
+			linear: { type: "http", url: "https://linear.example/mcp", repositoryRoots: [projectDir], onDemand: true },
 		});
 		for (const cwd of [projectDir, linked, path.join(linked, "subdir")]) {
 			clearFsCache();
 			const loaded = await loadAllMCPConfigs(cwd, { filterExa: false });
-			expect(loaded.configs.linear).toMatchObject({ url: "https://linear.example/mcp" });
+			expect(loaded.configs.linear).toMatchObject({ url: "https://linear.example/mcp", onDemand: true });
 		}
 		const unrelated = path.join(tempHome, "other", path.basename(projectDir));
 		await fs.mkdir(unrelated, { recursive: true });
@@ -205,5 +205,10 @@ describe("MCP scope filtering precedes connection-equivalence deduplication", ()
 			const loaded = await loadAllMCPConfigs(projectDir, { filterExa: false });
 			expect(loaded.configs.linear).toBeUndefined();
 		}
+	});
+	test("invalid on-demand values are excluded rather than becoming eager connections", async () => {
+		await writeMcpJson(userAgentDir, { usercontext: { ...CONNECTION, onDemand: "false" } });
+		const loaded = await loadAllMCPConfigs(projectDir, { enableProjectConfig: false, filterExa: false });
+		expect(loaded.configs.usercontext).toBeUndefined();
 	});
 });

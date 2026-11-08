@@ -116,6 +116,11 @@
           "type": "boolean",
           "description": "Whether OMP should try to connect this server."
         },
+        "onDemand": {
+          "type": "boolean",
+          "default": false,
+          "description": "Native and standalone MCP config: expose a connect tool without resolving credentials or starting a transport until explicitly activated."
+        },
         "repositoryRoots": {
           "type": "array",
           "minItems": 1,
@@ -157,6 +162,7 @@
           "required": ["command"],
           "properties": {
             "enabled": {},
+            "onDemand": {},
             "repositoryRoots": {},
             "timeout": {},
             "requestIdFormat": {},
@@ -206,6 +212,7 @@
           "required": ["type", "url"],
           "properties": {
             "enabled": {},
+            "onDemand": {},
             "repositoryRoots": {},
             "timeout": {},
             "requestIdFormat": {},
@@ -244,6 +251,7 @@
           "required": ["type", "url"],
           "properties": {
             "enabled": {},
+            "onDemand": {},
             "repositoryRoots": {},
             "timeout": {},
             "requestIdFormat": {},

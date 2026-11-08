@@ -48,6 +48,7 @@ import {
 	planXdevPromptDocs,
 	type XdevState,
 	xdevDocsFor,
+	xdevDocsAll,
 	xdevEntries,
 } from "../tools/xdev";
 import { type EditMode } from "@oh-my-pi/pi-tui/tools/edit";
@@ -1992,17 +1993,19 @@ export class SessionTools {
 			// inlines (their route line has no summary; the notice is what
 			// delivers their docs).
 			let routedSummaryNames: Set<string> | undefined;
-			if (this.#xdev) {
-				const docsPlan = planXdevPromptDocs(
-					this.#xdev,
-					cfgToolsXdevDocs.get(this.#host.settings),
-					cfgToolsXdevInlineDevices.get(this.#host.settings),
-				);
-				routedSummaryNames = new Set(
-					projectMountedMCPXdevGuidance(collectMountedMCPToolRoutes(listXdevTools(this.#xdev)))
-						.mappings.filter(mapping => docsPlan.catalog.has(mapping.name))
-						.map(mapping => mapping.name),
-				);
+			if (cfgToolsXdevDocs.get(this.#host.settings) !== "index") {
+				if (this.#xdev) {
+					const docsPlan = planXdevPromptDocs(
+						this.#xdev,
+						cfgToolsXdevDocs.get(this.#host.settings),
+						cfgToolsXdevInlineDevices.get(this.#host.settings),
+					);
+					routedSummaryNames = new Set(
+						projectMountedMCPXdevGuidance(collectMountedMCPToolRoutes(listXdevTools(this.#xdev)))
+							.mappings.filter(mapping => docsPlan.catalog.has(mapping.name))
+							.map(mapping => mapping.name),
+					);
+				}
 			}
 			for (const name of pending.added) {
 				if (this.#basePromptXdevNames.has(name) || routedSummaryNames?.has(name)) announcedMounts.add(name);
@@ -2023,6 +2026,7 @@ export class SessionTools {
 		const summaries = new Map(this.#xdev ? xdevEntries(this.#xdev).map(entry => [entry.name, entry.summary]) : []);
 		const added = addedNames.map(name => ({ name, summary: summaries.get(name) ?? "" }));
 		const removed = removedNames.map(name => ({ name }));
+		const compactIndex = cfgToolsXdevDocs.get(this.#host.settings) === "index";
 		const docs = this.#xdev
 			? xdevDocsFor(
 					this.#xdev,
@@ -2035,7 +2039,9 @@ export class SessionTools {
 			notice: {
 				role: "custom",
 				customType: XDEV_MOUNT_NOTICE_MESSAGE_TYPE,
-				content: prompt.render(xdevMountNoticePrompt, { added, removed, docs }),
+				content: compactIndex
+					? "xd:// tool index changed. Read xd:// for current paths and xd://<tool> for its schema before use."
+					: prompt.render(xdevMountNoticePrompt, { added, removed, docs }),
 				details: { added: addedNames, removed: removedNames },
 				attribution: "agent",
 				display: false,
@@ -2463,14 +2469,19 @@ export class SessionTools {
 		const describeTool = (tool: AgentTool): string =>
 			`${tool.name}=${tool.label ?? ""}|${tool.description ?? ""}|${tool.customWireName ?? ""}|${toolReadsSkillUris(tool)}`;
 		const descriptionSegment = tools.map(describeTool).join("\u0002");
-		const mountedMCPProjection = projectMountedMCPXdevGuidance(
-			collectMountedMCPToolRoutes(this.#xdev ? listXdevTools(this.#xdev) : []),
-		);
-		const mountedMCPRouteSegment =
-			JSON.stringify({
-				mappings: mountedMCPProjection.mappings.map(mapping => [mapping.label, mapping.path] as const),
-				hasOmittedMappings: mountedMCPProjection.hasOmittedMappings,
-			}) ?? "{}";
+		let mountedMCPRouteSegment: string;
+		if (this.#xdev && cfgToolsXdevDocs.get(this.#host.settings) === "index") {
+			mountedMCPRouteSegment = xdevDocsAll(this.#xdev, "index");
+		} else {
+			const mountedMCPProjection = projectMountedMCPXdevGuidance(
+				collectMountedMCPToolRoutes(this.#xdev ? listXdevTools(this.#xdev) : []),
+			);
+			mountedMCPRouteSegment =
+				JSON.stringify({
+					mappings: mountedMCPProjection.mappings.map(mapping => [mapping.label, mapping.path] as const),
+					hasOmittedMappings: mountedMCPProjection.hasOmittedMappings,
+				}) ?? "{}";
+		}
 		const serverInstructions = this.#getMcpServerInstructions?.();
 		let instructionsSegment = "";
 		if (serverInstructions && serverInstructions.size > 0) {
